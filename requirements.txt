@@ -10,4 +10,3 @@ python-pptx==1.0.2
 Pillow==10.4.0
 odfpy==1.4.1
 cryptography==43.0.3
-PyInstaller==6.10.0

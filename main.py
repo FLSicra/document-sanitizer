@@ -1,5 +1,6 @@
 import sys
 import os
+import platform
 
 
 def main():
@@ -26,11 +27,23 @@ def main():
 
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
     from gui.main_window import MainWindow
 
     app = QApplication(sys.argv)
     app.setApplicationName("Document Sanitizer")
     app.setOrganizationName("DocSanitizer")
+
+    # Set application icon (platform-aware for dock/taskbar display)
+    system = platform.system()
+    if system == "Darwin":
+        icon_file = os.path.join(base_dir, "icons", "app.icns")
+    elif system == "Windows":
+        icon_file = os.path.join(base_dir, "app.ico")
+    else:
+        icon_file = os.path.join(base_dir, "icons", "app.png")
+    if os.path.exists(icon_file):
+        app.setWindowIcon(QIcon(icon_file))
 
     window = MainWindow()
     window.show()

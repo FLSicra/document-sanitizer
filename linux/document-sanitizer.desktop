@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Document Sanitizer
+Comment=Detect and redact PII, credentials, and sensitive data from documents
+Exec=DocumentSanitizer
+Icon=document-sanitizer
+Terminal=false
+Categories=Office;Utility;Security;
+Keywords=PII;redact;sanitize;privacy;GDPR;

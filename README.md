@@ -1,6 +1,8 @@
 # Document Sanitizer
 
-A Windows desktop application for detecting and redacting Personally Identifiable Information (PII), credentials, and sensitive data from documents. Built with PySide6 and powered by [Presidio](https://github.com/microsoft/presidio) + [spaCy](https://spacy.io/).
+A cross-platform desktop application for detecting and redacting Personally Identifiable Information (PII), credentials, and sensitive data from documents. Built with PySide6 and powered by [Presidio](https://github.com/microsoft/presidio) + [spaCy](https://spacy.io/).
+
+Runs on **Windows**, **macOS**, and **Linux**.
 
 ## Features
 
@@ -26,32 +28,58 @@ Norwegian person names containing characters outside the English NER model's tra
 
 ## Installation
 
-### From installer
+### Pre-built binaries
 
-Download `DocumentSanitizer_Setup.exe` from the [Releases](../../releases) page and run it.
+Download the latest release for your platform from the [Releases](../../releases) page:
 
-### From source
+| Platform | File | Install |
+|----------|------|---------|
+| **Windows** | `DocumentSanitizer_Setup.exe` | Run the installer |
+| **macOS** | `DocumentSanitizer-macOS.dmg` | Open DMG, drag to Applications |
+| **Linux** | `DocumentSanitizer-Linux` | `chmod +x DocumentSanitizer-Linux && ./DocumentSanitizer-Linux` |
 
-Requires Python 3.11+ on Windows.
+### Quick start from source (any platform)
+
+Requires Python 3.11+. The launcher creates a virtual environment and installs all dependencies automatically:
 
 ```bash
+python run.py
+```
+
+Use `python run.py --reset` to recreate the virtual environment from scratch.
+
+### Manual setup from source
+
+```bash
+python -m venv .venv
+# Linux / macOS:
+source .venv/bin/activate
+# Windows:
+# .venv\Scripts\activate
 pip install -r requirements.txt
-python -m spacy download en_core_web_lg
 python main.py
 ```
 
+> **Linux note:** PySide6 requires system libraries. On Ubuntu/Debian:
+> ```bash
+> sudo apt-get install libxcb-xinerama0 libxkbcommon-x11-0 libglib2.0-0 libegl1
+> ```
+
 ## Building
 
-### Executable
+### Executable (all platforms)
 
 ```bash
-pip install pyinstaller
+pip install -r requirements-dev.txt
 pyinstaller document_sanitizer.spec
 ```
 
-Output: `dist/DocumentSanitizer.exe`
+Output varies by platform:
+- **Windows:** `dist/DocumentSanitizer.exe`
+- **macOS:** `dist/DocumentSanitizer.app`
+- **Linux:** `dist/DocumentSanitizer`
 
-### Installer
+### Windows installer
 
 Requires [Inno Setup 6](https://jrsoftware.org/isdl.php).
 
@@ -60,6 +88,10 @@ iscc installer.iss
 ```
 
 Output: `dist/Output/DocumentSanitizer_Setup.exe`
+
+### CI/CD
+
+Push a version tag (e.g. `v1.0.0`) to trigger the GitHub Actions workflow, which builds and publishes release artifacts for all three platforms automatically.
 
 ## Usage
 
@@ -86,14 +118,18 @@ Redaction tokens are encrypted using Fernet (AES-128-CBC + HMAC-SHA256) with a k
 
 ```
 main.py                  Entry point
+run.py                   Cross-platform launcher (auto venv setup)
 gui/                     PySide6 UI (main window, preview panel, settings)
 sanitizers/              Format-specific analyzers and redactors
 detectors/               Presidio engine wrapper and custom recognizers
 utils/                   File routing, streaming, spaCy loader
 vault/                   Token encryption and document restoration
 tests/                   Integration and unit tests
-document_sanitizer.spec  PyInstaller build spec
-installer.iss            Inno Setup installer script
+icons/                   Platform-specific app icons (icns, png)
+linux/                   Linux desktop entry
+.github/workflows/       CI/CD build pipeline
+document_sanitizer.spec  PyInstaller build spec (cross-platform)
+installer.iss            Inno Setup installer script (Windows)
 ```
 
 ## Dependencies

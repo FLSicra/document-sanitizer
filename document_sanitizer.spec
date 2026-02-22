@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
 from PyInstaller.utils.hooks import collect_data_files, collect_all
 
+# ── Data files and hidden imports (shared across all platforms) ───
 datas = []
 hiddenimports = []
 
@@ -53,6 +55,15 @@ hiddenimports += [
     'yaml',
 ]
 
+# ── Platform-specific icon ────────────────────────────────────────
+if sys.platform == 'darwin':
+    icon_file = 'icons/app.icns'
+elif sys.platform == 'win32':
+    icon_file = 'app.ico'
+else:
+    icon_file = 'icons/app.png'
+
+# ── Analysis (shared) ────────────────────────────────────────────
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -68,24 +79,63 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='DocumentSanitizer',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,   # windowed — no terminal popup
-    icon='app.ico',
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
+# ── macOS: .app bundle (directory mode via BUNDLE) ────────────────
+if sys.platform == 'darwin':
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name='DocumentSanitizer',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        icon=icon_file,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        name='DocumentSanitizer',
+    )
+    app = BUNDLE(
+        coll,
+        name='DocumentSanitizer.app',
+        icon=icon_file,
+        bundle_identifier='com.docsanitizer.app',
+        info_plist={
+            'CFBundleShortVersionString': '1.0.0',
+            'NSHighResolutionCapable': True,
+        },
+    )
+
+# ── Windows / Linux: single-file executable ───────────────────────
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name='DocumentSanitizer',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=(sys.platform == 'linux'),
+        upx=(sys.platform == 'win32'),
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,
+        icon=icon_file,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )
