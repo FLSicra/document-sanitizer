@@ -197,6 +197,8 @@ class TestM365Url:
 # ---------------------------------------------------------------------------
 
 class TestNorwegianNames:
+    """Backward-compat tests for the build_norwegian_name_recognizers API."""
+
     def setup_method(self):
         from detectors.norwegian_names import build_norwegian_name_recognizers
         self.recognizers = build_norwegian_name_recognizers()
@@ -226,8 +228,109 @@ class TestNorwegianNames:
     def test_aao_pattern_does_not_match_english_names(self):
         # "John Smith" contains no ÆØÅ — should not match the ÆØÅ-specific pattern
         results = self._analyze("John Smith is here")
-        aao_hits = [r for r in results if r.entity_type == "NORWEGIAN_PERSON_NAME" and r.score == 0.6]
+        aao_hits = [r for r in results if r.entity_type == "NORWEGIAN_PERSON_NAME" and r.score == 0.55]
         assert not aao_hits
+
+
+class TestNorwegianNameRecognizer:
+    """Tests for the expanded set-based Norwegian name recognizer."""
+
+    def setup_method(self):
+        from detectors.norwegian_names import _NorwegianNameRecognizer
+        self.r = _NorwegianNameRecognizer()
+
+    def _analyze(self, text: str) -> list:
+        return self.r.analyze(text, ["NORWEGIAN_PERSON_NAME"])
+
+    # --- Full name pairs ---
+
+    def test_known_first_plus_known_surname_score_085(self):
+        results = self._analyze("Bjørn Hansen sendte e-post")
+        pairs = [r for r in results if r.score == 0.85]
+        assert pairs
+        assert pairs[0].entity_type == "NORWEGIAN_PERSON_NAME"
+
+    def test_first_surname_pair_spans_both_words(self):
+        text = "Bjørn Hansen sendte e-post"
+        results = self._analyze(text)
+        pairs = [r for r in results if r.score == 0.85]
+        assert pairs
+        assert text[pairs[0].start:pairs[0].end] == "Bjørn Hansen"
+
+    def test_known_first_plus_capitalized_word_score_070(self):
+        # "Andersen" is a known surname, so this should be 0.85
+        # Use an unknown surname to test 0.70
+        results = self._analyze("Kjell Xylophonsen er prosjektleder")
+        hits = [r for r in results if r.score == 0.70]
+        assert hits
+
+    def test_capitalized_plus_known_surname_score_070(self):
+        # "Zchenkov" is not a known first name, "Hansen" is a known surname
+        results = self._analyze("Zchenkov Hansen er ny")
+        hits = [r for r in results if r.score == 0.70]
+        assert hits
+
+    # --- Standalone detection (aggressive) ---
+
+    def test_standalone_first_name_detected(self):
+        results = self._analyze("Bjørn sendte rapporten til kontoret")
+        assert any(r.entity_type == "NORWEGIAN_PERSON_NAME" and r.score == 0.50 for r in results)
+
+    def test_standalone_surname_detected(self):
+        results = self._analyze("Kontoret tilhører Hansen i dag")
+        assert any(r.entity_type == "NORWEGIAN_PERSON_NAME" and r.score == 0.50 for r in results)
+
+    def test_standalone_common_norwegian_name(self):
+        results = self._analyze("Terje sa at det var greit")
+        assert any(r.entity_type == "NORWEGIAN_PERSON_NAME" for r in results)
+
+    # --- False positive prevention ---
+
+    def test_short_ambiguous_words_not_flagged(self):
+        # "Ja", "Vi", "Og" should not be flagged
+        results = self._analyze("Ja vi er enige og det er bra")
+        assert not results
+
+    def test_lowercase_name_not_flagged(self):
+        # "bjørn" (lowercase) means "bear" — should not match
+        results = self._analyze("bjørn er et rovdyr i skogen")
+        assert not results
+
+    def test_two_char_name_not_standalone(self):
+        # "Bo" is a real name but too short for standalone detection
+        results = self._analyze("Bo var der alene")
+        standalone = [r for r in results if r.score == 0.50]
+        assert not standalone
+
+    # --- Scandinavian extras ---
+
+    def test_swedish_name_detected(self):
+        results = self._analyze("Gustaf Johansson er svensk")
+        assert any(r.entity_type == "NORWEGIAN_PERSON_NAME" for r in results)
+
+    def test_danish_name_detected(self):
+        results = self._analyze("Troels Madsen besøkte Oslo")
+        assert any(r.entity_type == "NORWEGIAN_PERSON_NAME" for r in results)
+
+    # --- Data file loading ---
+
+    def test_data_files_have_substantial_content(self):
+        from detectors.norwegian_names import _load_name_set
+        first = _load_name_set("norwegian_first_names.txt")
+        surnames = _load_name_set("norwegian_surnames.txt")
+        assert len(first) > 100
+        assert len(surnames) > 100
+
+    # --- Performance ---
+
+    def test_large_text_completes_quickly(self):
+        import time
+        text = "Bjørn Hansen og Kari Nordmann diskuterte saken. " * 3000
+        start = time.perf_counter()
+        results = self._analyze(text)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 2.0
+        assert len(results) > 0
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ ENTITY_GROUPS = {
     "Norwegian — Identifiers": [
         "NORWEGIAN_COMPANY",
         "NORWEGIAN_ORG_NUMBER",
+        "NORWEGIAN_PERSON_NAME",
         "NORWEGIAN_NATIONAL_ID",
         "NORWEGIAN_D_NUMBER",
         "NORWEGIAN_BANK_ACCOUNT",

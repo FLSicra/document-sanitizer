@@ -95,7 +95,7 @@ def get_analyzer(custom_terms: tuple[str, ...] = ()) -> AnalyzerEngine:
 
 
 # Norwegian common words that spaCy en_core_web_lg misclassifies as PERSON/NRP/LOCATION
-_NLP_ENTITY_TYPES = {"PERSON", "NRP", "LOCATION"}
+_NLP_ENTITY_TYPES = {"PERSON", "NRP", "LOCATION", "NORWEGIAN_PERSON_NAME"}
 _NORWEGIAN_STOPWORDS = {
     # labels / field names
     "fødselsnummer", "d-nummer", "kontonummer", "adresse", "telefon",

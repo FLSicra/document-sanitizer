@@ -18,6 +18,9 @@ datas += collect_data_files('presidio_anonymizer')
 
 datas += collect_data_files('numpy')
 
+# Norwegian name data files (SSB-sourced first names, surnames, Scandinavian extras)
+datas += [('data', 'data')]
+
 hiddenimports += [
     'numpy',
     'numpy.core',

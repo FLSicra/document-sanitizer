@@ -2,6 +2,25 @@
 
 All notable changes to Document Sanitizer are documented in this file.
 
+## [1.2.0] - 2026-02-26
+
+### Added
+
+- **Massively expanded Norwegian name database** -- replaced 53 hardcoded first names with 1,968 first names and 3,694 surnames sourced from SSB (Statistics Norway) public statistics (Tables 10467 and 12891)
+- **Scandinavian name coverage** -- added 42 common Swedish and Danish first names that English NER models typically miss
+- **Aggressive standalone name detection** -- first names and surnames are now flagged even without a paired surname/first name, critical for transcriptions where people mention names casually
+- **Tiered confidence scoring** -- known first + known surname: 0.85, name + capitalized word: 0.70, standalone name: 0.50
+- **SSB data fetch utility** (`scripts/fetch_ssb_names.py`) -- one-time script to refresh name lists from SSB's public API
+- **External name data files** (`data/`) -- names stored in text files for easy maintenance and updates
+
+### Changed
+
+- **`detectors/norwegian_names.py`** -- replaced regex-based `PatternRecognizer` with a custom `EntityRecognizer` using O(1) set-based lookup, significantly faster with thousands of names
+- **`detectors/engine.py`** -- `NORWEGIAN_PERSON_NAME` now filtered through Norwegian stopwords to reduce false positives
+- **`gui/settings_panel.py`** -- `NORWEGIAN_PERSON_NAME` now visible in the GUI entity settings
+- **`gui/preview_panel.py`** -- Norwegian person names display with medium severity (orange) color
+- **`document_sanitizer.spec`** -- name data files bundled in PyInstaller builds
+
 ## [1.1.0] - 2026-02-22
 
 ### Added
