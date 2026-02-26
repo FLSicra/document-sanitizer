@@ -206,29 +206,6 @@ class _NorwegianNameRecognizer(EntityRecognizer):
 
 
 # ---------------------------------------------------------------------------
-# ÆØÅ fallback — catches rare names not in the data files
-# ---------------------------------------------------------------------------
-
-def _norwegian_name_aao() -> PatternRecognizer:
-    """
-    Detects Norwegian names that contain ÆØÅ characters.
-
-    en_core_web_lg (an English model) treats words with these characters as
-    out-of-vocabulary tokens and frequently fails to classify them as PERSON.
-    This pattern matches a capitalised word containing ÆØÅ followed by a
-    capitalised word (likely a surname).
-    """
-    return PatternRecognizer(
-        supported_entity="NORWEGIAN_PERSON_NAME",
-        patterns=[Pattern(
-            name="norwegian_name_aao",
-            regex=r"[A-ZÆØÅ][a-zæøå]*[æøåÆØÅ][a-zæøå]*\s+[A-ZÆØÅ][a-zæøå]+",
-            score=0.55,
-        )],
-    )
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -236,5 +213,4 @@ def build_norwegian_name_recognizers() -> list:
     """Return all Norwegian/Scandinavian name recognizers."""
     return [
         _NorwegianNameRecognizer(),
-        _norwegian_name_aao(),
     ]

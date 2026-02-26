@@ -225,11 +225,15 @@ class TestNorwegianNames:
         results = self._analyze("Ørjan Johansen")
         assert any(r.entity_type == "NORWEGIAN_PERSON_NAME" for r in results)
 
-    def test_aao_pattern_does_not_match_english_names(self):
-        # "John Smith" contains no ÆØÅ — should not match the ÆØÅ-specific pattern
-        results = self._analyze("John Smith is here")
-        aao_hits = [r for r in results if r.entity_type == "NORWEGIAN_PERSON_NAME" and r.score == 0.55]
-        assert not aao_hits
+    def test_non_norwegian_names_no_match(self):
+        # Names not in the Norwegian SSB database should not be detected
+        results = self._analyze("Bartholomew Chadwick is here")
+        assert not any(r.entity_type == "NORWEGIAN_PERSON_NAME" for r in results)
+
+    def test_common_norwegian_words_not_flagged(self):
+        # Words with ÆØÅ that are NOT names should not be detected
+        results = self._analyze("Vi må åpne og så ville vi prøve noe hørt om det")
+        assert not results
 
 
 class TestNorwegianNameRecognizer:
