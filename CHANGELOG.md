@@ -2,6 +2,21 @@
 
 All notable changes to Document Sanitizer are documented in this file.
 
+## [1.3.0] - 2026-02-26
+
+### Added
+
+- **SSB name-database cross-reference for PERSON/NRP** -- spaCy PERSON detections are now validated against the 5,600+ SSB name database; spans without a known name are suppressed, eliminating false positives on Norwegian common words
+- **PERSON span trimming** -- spaCy's wide spans like "Tore har sagt" are trimmed to just the name portion ("Tore"), with multi-name spans split into separate results
+- **NORWEGIAN_COMPANY uppercase suffix check** -- company detections now require the legal suffix (AS, DA, ASA, etc.) to be uppercase in the original text, preventing false matches on lowercase "da"/"sa" in ordinary Norwegian sentences
+- **Norwegian common words list** -- ~350 common Norwegian words (pronouns, verbs, adjectives, adverbs, ordinals, nouns) used for LOCATION/COMPANY heuristic filtering
+- **Proper-noun heuristic for LOCATION** -- LOCATION detections are suppressed unless the span contains a capitalized word that is not a common Norwegian word
+
+### Changed
+
+- **`detectors/engine.py`** -- completely rewritten false-positive suppression: two-tier strategy with name-database cross-reference for PERSON/NRP and proper-noun heuristic for LOCATION/COMPANY
+- **`gui/preview_panel.py`** -- removed 500-row limit on preview table; all detections are now shown
+
 ## [1.2.0] - 2026-02-26
 
 ### Added

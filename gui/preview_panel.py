@@ -42,7 +42,7 @@ def _severity(entity_type: str) -> str:
 
 
 COLUMNS = ["File", "Entity Type", "Original Value", "Page/Line", "Confidence", "Redact"]
-MAX_PREVIEW_ROWS = 500
+MAX_PREVIEW_ROWS = 0  # 0 = no limit; show all detections
 
 
 class PreviewPanel(QWidget):
@@ -99,14 +99,18 @@ class PreviewPanel(QWidget):
     def load_detections(self, filename: str, detections: list[Detection]):
         """Append detections from a file into the table."""
         total = len(detections)
-        display = detections[:MAX_PREVIEW_ROWS]
-        if total > MAX_PREVIEW_ROWS:
-            self._truncation_label.setText(
-                f"Showing {MAX_PREVIEW_ROWS} of {total} findings. "
-                f"All {total} will be redacted on sanitize."
-            )
-            self._truncation_label.setVisible(True)
+        if MAX_PREVIEW_ROWS > 0:
+            display = detections[:MAX_PREVIEW_ROWS]
+            if total > MAX_PREVIEW_ROWS:
+                self._truncation_label.setText(
+                    f"Showing {MAX_PREVIEW_ROWS} of {total} findings. "
+                    f"All {total} will be redacted on sanitize."
+                )
+                self._truncation_label.setVisible(True)
+            else:
+                self._truncation_label.setVisible(False)
         else:
+            display = detections
             self._truncation_label.setVisible(False)
 
         self._table.setUpdatesEnabled(False)

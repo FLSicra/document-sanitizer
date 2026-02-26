@@ -94,27 +94,282 @@ def get_analyzer(custom_terms: tuple[str, ...] = ()) -> AnalyzerEngine:
     return AnalyzerEngine(registry=registry, nlp_engine=nlp_engine)
 
 
-# Norwegian common words that spaCy en_core_web_lg misclassifies as PERSON/NRP/LOCATION
-_NLP_ENTITY_TYPES = {"PERSON", "NRP", "LOCATION", "NORWEGIAN_PERSON_NAME"}
-_NORWEGIAN_STOPWORDS = {
-    # labels / field names
+# ---------------------------------------------------------------------------
+# Norwegian false-positive suppression for spaCy en_core_web_lg
+# ---------------------------------------------------------------------------
+# spaCy's English NER model frequently misclassifies common Norwegian words
+# and phrases as PERSON, NRP, or LOCATION.
+#
+# Strategy:
+#   PERSON / NRP  — cross-reference with our SSB name databases (5 600+ names).
+#                   Only keep the detection if the span contains at least one
+#                   word that is a known Norwegian/Scandinavian name.  This avoids
+#                   the impossible task of enumerating every Norwegian common word.
+#   LOCATION / NORWEGIAN_COMPANY — use a proper-noun heuristic (the common-word
+#                   list is good enough for non-person entities).
+
+# Entity types that use the *proper-noun heuristic* (common-word list)
+_HEURISTIC_ENTITY_TYPES = {"LOCATION", "NORWEGIAN_COMPANY"}
+# Entity types that require a *known name* from our SSB databases
+_NAME_CHECK_ENTITY_TYPES = {"PERSON", "NRP"}
+
+_NORWEGIAN_COMMON_WORDS: frozenset[str] = frozenset({
+    # --- pronouns ---
+    "jeg", "du", "han", "hun", "den", "det", "vi", "dere", "de",
+    "meg", "deg", "seg", "oss", "dem", "ham", "henne",
+    "min", "mitt", "mine", "din", "ditt", "dine",
+    "sin", "sitt", "sine", "vår", "vårt", "våre",
+    "deres", "hans", "hennes",
+    "denne", "dette", "disse", "slik", "slikt", "slike",
+    "selv", "hverandre", "noe", "noen", "ingen", "ingenting",
+    "alt", "alle", "hver", "annet", "andre", "annen",
+    "hva", "hvem", "hvilken", "hvilket", "hvilke",
+    # --- determiners / articles ---
+    "en", "et", "ei",
+    # --- prepositions ---
+    "i", "på", "til", "fra", "av", "med", "for", "om", "etter",
+    "over", "under", "ved", "mellom", "mot", "hos", "blant",
+    "gjennom", "langs", "rundt", "siden", "uten", "ifølge",
+    "innenfor", "utenfor", "overfor", "innen",
+    # --- conjunctions ---
+    "og", "eller", "men", "så", "at", "hvis", "når", "da",
+    "fordi", "siden", "enn", "enten", "verken", "både",
+    "dersom", "likevel", "imidlertid", "dessuten", "altså",
+    # --- particles / infinitive marker ---
+    "å",
+    # --- common verbs (infinitive, present, past, participle) ---
+    "er", "var", "vært", "være",
+    "har", "hadde", "hatt", "ha",
+    "skal", "skulle", "vil", "ville",
+    "kan", "kunne", "må", "måtte",
+    "bli", "blir", "ble", "blitt",
+    "gjøre", "gjør", "gjorde", "gjort",
+    "si", "sier", "sa", "sagt",
+    "komme", "kommer", "kom", "kommet",
+    "gå", "går", "gikk", "gått",
+    "se", "ser", "så", "sett",
+    "ta", "tar", "tok", "tatt",
+    "få", "får", "fikk", "fått",
+    "gi", "gir", "gav", "ga", "gitt",
+    "vite", "vet", "visste", "visst",
+    "finne", "finner", "fant", "funnet",
+    "holde", "holder", "holdt",
+    "stå", "står", "sto", "stod", "stått",
+    "ligge", "ligger", "lå", "ligget",
+    "sitte", "sitter", "satt",
+    "legge", "legger", "la", "lagt",
+    "lære", "lærer", "lærte", "lært",
+    "lese", "leser", "leste", "lest",
+    "skrive", "skriver", "skrev", "skrevet",
+    "bruke", "bruker", "brukte", "brukt",
+    "jobbe", "jobber", "jobbet",
+    "snakke", "snakker", "snakket",
+    "prøve", "prøver", "prøvd", "prøvde",
+    "endre", "endrer", "endret",
+    "fortelle", "forteller", "fortalte", "fortalt",
+    "kjenne", "kjenner", "kjente", "kjent",
+    "mene", "mener", "mente", "ment",
+    "tro", "tror", "trodde", "trodd",
+    "tenke", "tenker", "tenkte", "tenkt",
+    "høre", "hører", "hørte", "hørt",
+    "spørre", "spør", "spurte", "spurt",
+    "svare", "svarer", "svarte", "svart",
+    "begynne", "begynner", "begynte", "begynt",
+    "slutte", "slutter", "sluttet",
+    "åpne", "åpner", "åpnet",
+    "lukke", "lukker", "lukket",
+    "sende", "sender", "sendte", "sendt",
+    "hjelpe", "hjelper", "hjalp", "hjulpet",
+    "følge", "følger", "fulgte", "fulgt",
+    "virke", "virker", "virket",
+    "handle", "handler", "handlet",
+    "informere", "informerer", "informerte", "informert",
+    "modernisere", "moderniserer", "moderniserte", "modernisert",
+    "skje", "skjer", "skjedde", "skjedd",
+    "sette", "setter", "settes", "satte",
+    "hente", "henter", "hentet",
+    "vise", "viser", "viste", "vist",
+    "trenge", "trenger", "trengte", "trengt",
+    "passe", "passer", "passet",
+    "fungere", "fungerer", "fungerte", "fungert",
+    "påvirke", "påvirker", "påvirket",
+    "oppdatere", "oppdaterer", "oppdatert",
+    "forbedre", "forbedrer", "forbedret",
+    "diskutere", "diskuterer", "diskuterte", "diskutert",
+    # --- adverbs ---
+    "ikke", "også", "bare", "jo", "nå", "her", "der",
+    "ennå", "allerede", "aldri", "alltid", "ofte", "kanskje",
+    "vel", "nok", "hvor", "hvordan", "hvorfor", "helt",
+    "ganske", "veldig", "svært", "litt", "mye", "mer", "mest",
+    "lite", "mindre", "minst", "godt", "bedre", "best",
+    "fort", "snart", "lenge", "straks", "igjen", "ellers",
+    "heller", "dessverre", "faktisk", "egentlig", "tydeligvis",
+    "akkurat", "nettopp", "deretter", "tidligere", "videre",
+    "inne", "ute", "oppe", "nede", "borte", "fremover",
+    # --- adjectives ---
+    "ny", "nytt", "nye", "god", "godt", "gode",
+    "stor", "stort", "store", "liten", "lite", "små",
+    "gammel", "gammelt", "gamle", "ung", "ungt", "unge",
+    "lang", "langt", "lange", "kort", "korte",
+    "enig", "enige", "viktig", "viktige",
+    "klar", "klart", "klare", "ferdig", "ferdige",
+    "riktig", "riktige", "feil", "greit",
+    "annerledes", "forskjellig", "forskjellige",
+    "mulig", "umulig",
+    "slik", "slikt", "slike", "sånn", "sånne", "sånt",
+    # --- ordinals / numerals ---
+    "første", "andre", "tredje", "fjerde", "femte",
+    "sjette", "syvende", "åttende", "niende", "tiende",
+    "siste", "forrige", "neste",
+    # --- common nouns (non-name) ---
+    "ting", "sak", "saken", "del", "deler",
+    "gang", "ganger", "tid", "tiden", "dag", "dagen",
+    "rutine", "rutiner", "rutinene",
+    "beskjed", "grunn", "grunner", "måte", "måten",
+    "folk", "flere", "mange", "masse",
+    "arbeid", "jobb", "møte", "møtet",
+    "informasjon", "lusning", "system", "prosjekt",
+    "tilgang", "tilgangen", "sjef", "sjefen", "sjefene",
+    "uke", "uken", "tips", "tipset",
+    # --- interjections / fillers ---
+    "ja", "nei", "ok", "hei", "takk", "bra",
+    # --- labels / field names ---
     "fødselsnummer", "d-nummer", "kontonummer", "adresse", "telefon",
     "kontaktperson", "navn", "epost", "e-post", "passord", "brukernavn",
-    # patient / medical context
+    # --- patient / medical context ---
     "pasienten", "pasient", "behandling", "diagnose", "lege", "sykehus",
-    # body / biometric
+    # --- body / biometric ---
     "fingeravtrykk", "ansikt", "iris", "biometri",
-    # document / report words
+    # --- document / report words ---
     "prosjektrapport", "rapport", "notat", "dokument", "vedlegg", "oversikt",
     "konfidensielt", "internt", "eksternt",
-    # org/role words
+    # --- org/role words ---
     "kunde", "leverandør", "ansatt", "arbeidsgiver", "arbeidstaker",
     "direktør", "leder", "ansvarlig",
-}
+})
 
 
 _CHUNK_SIZE = 80_000   # chars — well under spaCy's 1M limit; overlap avoids split-boundary misses
 _CHUNK_OVERLAP = 200
+
+
+import re as _re
+_WORD_RE = _re.compile(r"[A-Za-zÆØÅæøåÀ-ÿ]+")
+
+
+# ---------------------------------------------------------------------------
+# Name-database cross-reference for PERSON / NRP suppression
+# ---------------------------------------------------------------------------
+_cached_name_sets: tuple[frozenset[str], frozenset[str], frozenset[str]] | None = None
+
+
+def _get_name_sets() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Lazy-load the SSB name sets (cached after first call)."""
+    global _cached_name_sets
+    if _cached_name_sets is None:
+        from detectors.norwegian_names import _load_name_set
+        _cached_name_sets = (
+            _load_name_set("norwegian_first_names.txt"),
+            _load_name_set("norwegian_surnames.txt"),
+            _load_name_set("scandinavian_extra_names.txt"),
+        )
+    return _cached_name_sets
+
+
+def _is_known_name(word: str, first_names, surnames, extra_names) -> bool:
+    return word in first_names or word in surnames or word in extra_names
+
+
+def _extract_name_spans(text: str, r):
+    """Trim a PERSON/NRP span to only the name-containing portions.
+
+    spaCy often wraps common words around a name ("Tore har sagt").
+    This function extracts groups of consecutive capitalized words that
+    contain at least one known name (3+ chars) and returns new
+    RecognizerResult(s) covering only those groups.
+
+    Example: "jo Tore og Raimo noe" → ["Tore", "Raimo"] (two results)
+    """
+    from presidio_analyzer import RecognizerResult
+    first_names, surnames, extra_names = _get_name_sets()
+    span_text = text[r.start:r.end]
+
+    # Collect capitalized tokens that are NOT common Norwegian words.
+    # "Ikke Tore" → skip "Ikke" (common word), keep "Tore".
+    cap_tokens: list[tuple[str, int, int]] = []
+    for m in _WORD_RE.finditer(span_text):
+        word = m.group()
+        if word[0].isupper() and word.lower() not in _NORWEGIAN_COMMON_WORDS:
+            cap_tokens.append((word, m.start(), m.end()))
+
+    if not cap_tokens:
+        return []
+
+    # Group consecutive capitalized words (separated by whitespace only, max 3 chars gap)
+    groups: list[list[tuple[str, int, int]]] = []
+    current = [cap_tokens[0]]
+    for i in range(1, len(cap_tokens)):
+        _, _, prev_end = current[-1]
+        _, curr_start, _ = cap_tokens[i]
+        between = span_text[prev_end:curr_start]
+        if between.strip() == "" and len(between) <= 3:
+            current.append(cap_tokens[i])
+        else:
+            groups.append(current)
+            current = [cap_tokens[i]]
+    groups.append(current)
+
+    # Emit a result for each group that contains a known name (3+ chars)
+    results = []
+    for group in groups:
+        if any(len(w) >= 3 and _is_known_name(w, first_names, surnames, extra_names)
+               for w, _, _ in group):
+            group_start = r.start + group[0][1]
+            group_end = r.start + group[-1][2]
+            results.append(RecognizerResult(
+                entity_type=r.entity_type,
+                start=group_start,
+                end=group_end,
+                score=r.score,
+            ))
+    return results
+
+
+def _looks_like_common_text(span: str) -> bool:
+    """Return True (suppress) if the span contains no proper-noun-looking words.
+
+    Used for LOCATION / NORWEGIAN_COMPANY filtering (not PERSON/NRP).
+    A proper noun must be capitalised, 3+ chars, and NOT a common Norwegian word.
+    """
+    words = _WORD_RE.findall(span)
+    if not words:
+        return True
+    if all(w.lower() in _NORWEGIAN_COMMON_WORDS for w in words):
+        return True
+    for word in words:
+        if (len(word) >= 3
+                and word[0].isupper()
+                and word.lower() not in _NORWEGIAN_COMMON_WORDS):
+            return False  # found a likely proper noun → keep detection
+    return True  # no proper nouns → suppress
+
+
+# Norwegian company legal-form suffixes.  Presidio runs the NORWEGIAN_COMPANY
+# regex with re.IGNORECASE, so lowercase "da" or "sa" in ordinary text can
+# match.  We post-check that the suffix is UPPERCASE in the original text.
+_COMPANY_SUFFIXES = {"ASA", "ANS", "IKS", "NUF", "FKF", "ENK",
+                     "AS", "DA", "SA", "BA", "KS", "SF", "SE", "STI", "KF"}
+_SUFFIX_RE = _re.compile(
+    r"(?:" + "|".join(sorted(_COMPANY_SUFFIXES, key=len, reverse=True)) + r")\s*$"
+)
+
+
+def _company_suffix_is_uppercase(span: str) -> bool:
+    """Return True if the company suffix at the end of the span is uppercase."""
+    m = _SUFFIX_RE.search(span)
+    if not m:
+        return False
+    return m.group().strip() in _COMPANY_SUFFIXES  # exact case match
 
 
 def _analyze_chunk(analyzer, text: str, entities: list[str]) -> list:
@@ -126,11 +381,25 @@ def _analyze_chunk(analyzer, text: str, entities: list[str]) -> list:
     )
     filtered = []
     for r in results:
-        if r.entity_type in _NLP_ENTITY_TYPES:
-            matched = text[r.start:r.end].strip().lower()
-            if matched in _NORWEGIAN_STOPWORDS:
+        if r.entity_type in _NAME_CHECK_ENTITY_TYPES:
+            # PERSON / NRP: trim span to name-only portions (may yield 0..N results)
+            filtered.extend(_extract_name_spans(text, r))
+        elif r.entity_type == "NORWEGIAN_COMPANY":
+            span = text[r.start:r.end]
+            # Require the suffix (AS, DA, etc.) to be UPPERCASE in the original text
+            if not _company_suffix_is_uppercase(span):
                 continue
-        filtered.append(r)
+            if _looks_like_common_text(span):
+                continue
+            filtered.append(r)
+        elif r.entity_type in _HEURISTIC_ENTITY_TYPES:
+            # LOCATION: use proper-noun heuristic
+            span = text[r.start:r.end].strip()
+            if _looks_like_common_text(span):
+                continue
+            filtered.append(r)
+        else:
+            filtered.append(r)
     return filtered
 
 
