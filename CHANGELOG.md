@@ -2,6 +2,22 @@
 
 All notable changes to Document Sanitizer are documented in this file.
 
+## [1.4.0] - 2026-02-27
+
+### Added
+
+- **Column sorting on preview results** -- click any column header (File, Entity Type, Original Value, Page/Line, Confidence) to sort ascending/descending; Confidence column sorts numerically instead of alphabetically
+- **Collapsible detection settings** -- all entity group sections (PII, Financial, Network & Paths, Norwegian Identifiers, etc.) are now collapsible dropdown panels with arrow indicators, replacing the previous always-expanded group boxes
+- **Per-section scrollbars** -- each collapsible section has its own scroll area (capped at 150 px), keeping the settings panel compact even with many entity types
+- **Light / Dark mode toggle** -- new toolbar button switches the entire application between a light palette and a dark palette
+- **`gui/theme.py` module** -- centralised theme system with separate severity colour tables per mode and a `theme_changed` signal for live repainting
+
+### Changed
+
+- **`gui/preview_panel.py`** -- severity row colours now come from the theme module; detection references are stored in table items via `UserRole` data so row selection and context viewer work correctly after sorting
+- **`gui/settings_panel.py`** -- replaced `QGroupBox` widgets with `CollapsibleSection`; header buttons use `palette()` references so they adapt automatically to light/dark mode
+- **`gui/main_window.py`** -- added theme toggle button, applies light palette on startup, re-renders the preview table when theme changes
+
 ## [1.3.0] - 2026-02-26
 
 ### Added

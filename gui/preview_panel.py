@@ -5,15 +5,22 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
 from sanitizers.base import Detection
+from gui.theme import get_severity_colors
 
-# Severity color mapping
-SEVERITY_COLORS = {
-    "high": QColor(255, 100, 100),    # red — credentials/secrets
-    "medium": QColor(255, 180, 80),   # orange — PII
-    "low": QColor(255, 240, 100),     # yellow — infra
-}
+DETECTION_ROLE = Qt.ItemDataRole.UserRole + 1
+FILENAME_ROLE = Qt.ItemDataRole.UserRole + 2
+SORT_VALUE_ROLE = Qt.ItemDataRole.UserRole + 3
+
+
+class _NumericSortItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts by a numeric value stored in SORT_VALUE_ROLE."""
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        a = self.data(SORT_VALUE_ROLE)
+        b = other.data(SORT_VALUE_ROLE) if other else None
+        if a is not None and b is not None:
+            return a < b
+        return super().__lt__(other)
 
 HIGH_SEVERITY_TYPES = {
     # Cloud secrets / financial
@@ -64,6 +71,9 @@ class PreviewPanel(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSortingEnabled(True)
+        self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.horizontalHeader().setSectionsClickable(True)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         self._splitter.addWidget(self._table)
 
@@ -113,23 +123,34 @@ class PreviewPanel(QWidget):
             display = detections
             self._truncation_label.setVisible(False)
 
+        severity_colors = get_severity_colors()
+
+        self._table.setSortingEnabled(False)
         self._table.setUpdatesEnabled(False)
         for d in display:
             self._detections.append((filename, d))
             row = self._table.rowCount()
             self._table.insertRow(row)
 
-            color = SEVERITY_COLORS[_severity(d.entity_type)]
+            bg, fg = severity_colors[_severity(d.entity_type)]
+
+            # Confidence uses _NumericSortItem for proper numeric sorting
+            conf_item = _NumericSortItem(f"{d.score:.0%}")
+            conf_item.setData(SORT_VALUE_ROLE, d.score)
 
             items = [
                 QTableWidgetItem(filename),
                 QTableWidgetItem(d.entity_type),
                 QTableWidgetItem(d.original_value),
                 QTableWidgetItem(str(d.page_or_line or "")),
-                QTableWidgetItem(f"{d.score:.0%}"),
+                conf_item,
             ]
             for col, item in enumerate(items):
-                item.setBackground(color)
+                item.setBackground(bg)
+                item.setForeground(fg)
+                # Store detection and filename in every item for retrieval after sorting
+                item.setData(DETECTION_ROLE, id(d))
+                item.setData(FILENAME_ROLE, filename)
                 self._table.setItem(row, col, item)
 
             # Redact checkbox
@@ -144,6 +165,7 @@ class PreviewPanel(QWidget):
             chk_layout.setContentsMargins(0, 0, 0, 0)
             self._table.setCellWidget(row, len(COLUMNS) - 1, chk_widget)
         self._table.setUpdatesEnabled(True)
+        self._table.setSortingEnabled(True)
 
     def clear(self):
         self._table.setRowCount(0)
@@ -155,13 +177,24 @@ class PreviewPanel(QWidget):
     def _on_redact_changed(self, detection: Detection, state: int):
         detection.redact = bool(state)
 
+    def _detection_for_row(self, row: int):
+        """Look up the Detection object for a (possibly re-sorted) table row."""
+        item = self._table.item(row, 0)
+        if item is None:
+            return None
+        det_id = item.data(DETECTION_ROLE)
+        for _, d in self._detections:
+            if id(d) == det_id:
+                return d
+        return None
+
     def _on_selection_changed(self):
         rows = self._table.selectedItems()
         if not rows:
             return
         row = self._table.currentRow()
-        if 0 <= row < len(self._detections):
-            _, det = self._detections[row]
+        det = self._detection_for_row(row)
+        if det is not None:
             self._context_view.setPlainText(
                 f"Entity: {det.entity_type}\n"
                 f"Value: {det.original_value}\n"

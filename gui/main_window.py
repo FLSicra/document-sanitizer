@@ -11,6 +11,7 @@ from PySide6.QtGui import QFont
 from gui.file_picker import pick_files, pick_folder, get_onedrive_options
 from gui.preview_panel import PreviewPanel
 from gui.settings_panel import SettingsPanel
+from gui import theme
 from utils.file_router import get_sanitizer, is_supported
 from vault.vault import SanitizeSession
 from vault.restore import restore_file
@@ -101,6 +102,7 @@ class MainWindow(QMainWindow):
         self._threads: list[QThread] = []
         self._workers: list[QObject] = []
         self._analyzing = False
+        theme.apply_theme(False)  # start in light mode
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -181,6 +183,16 @@ class MainWindow(QMainWindow):
         browse_btn.setToolTip("Browse for output folder")
         browse_btn.clicked.connect(self._browse_output)
         tb_layout.addWidget(browse_btn)
+
+        tb_layout.addWidget(_separator())
+
+        # Theme toggle
+        self._theme_btn = QPushButton("Dark mode")
+        self._theme_btn.setFixedHeight(36)
+        self._theme_btn.setCheckable(True)
+        self._theme_btn.setToolTip("Toggle between light and dark mode")
+        self._theme_btn.clicked.connect(self._toggle_theme)
+        tb_layout.addWidget(self._theme_btn)
 
         layout.addWidget(toolbar)
 
@@ -480,6 +492,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Settings
     # ------------------------------------------------------------------
+
+    def _toggle_theme(self):
+        dark = self._theme_btn.isChecked()
+        self._theme_btn.setText("Light mode" if dark else "Dark mode")
+        theme.apply_theme(dark)
+        # Re-render the preview table so severity colours update
+        row = self._file_list.currentRow()
+        if 0 <= row < len(self._files):
+            name = self._files[row].name
+            if name in self._detections_map:
+                self._preview.clear()
+                self._preview.load_detections(name, self._detections_map[name])
 
     def _on_settings_changed(self):
         from detectors.engine import invalidate_cache
