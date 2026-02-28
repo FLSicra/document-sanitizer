@@ -1,4 +1,5 @@
 from __future__ import annotations
+import threading
 from functools import lru_cache
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
 from presidio_analyzer.nlp_engine import NlpEngineProvider
@@ -61,9 +62,12 @@ ENABLED_ENTITIES = [
 ]
 
 
+_analyzer_lock = threading.Lock()
+
+
 @lru_cache(maxsize=1)
-def get_analyzer(custom_terms: tuple[str, ...] = ()) -> AnalyzerEngine:
-    """Return cached AnalyzerEngine. Pass custom_terms as a tuple for cache key stability."""
+def _build_analyzer(custom_terms: tuple[str, ...] = ()) -> AnalyzerEngine:
+    """Build and cache an AnalyzerEngine. Called under _analyzer_lock."""
     from detectors.cloud_secrets import build_cloud_recognizers
     from detectors.norway_gdpr import build_norway_gdpr_recognizers
     from detectors.norwegian_names import build_norwegian_name_recognizers
@@ -92,6 +96,12 @@ def get_analyzer(custom_terms: tuple[str, ...] = ()) -> AnalyzerEngine:
         registry.add_recognizer(build_custom_term_recognizer(list(custom_terms)))
 
     return AnalyzerEngine(registry=registry, nlp_engine=nlp_engine)
+
+
+def get_analyzer(custom_terms: tuple[str, ...] = ()) -> AnalyzerEngine:
+    """Return cached AnalyzerEngine (thread-safe)."""
+    with _analyzer_lock:
+        return _build_analyzer(custom_terms)
 
 
 # ---------------------------------------------------------------------------
@@ -460,4 +470,5 @@ def analyze_text(
 
 def invalidate_cache() -> None:
     """Call when custom recognizer config changes."""
-    get_analyzer.cache_clear()
+    with _analyzer_lock:
+        _build_analyzer.cache_clear()

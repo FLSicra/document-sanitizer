@@ -15,7 +15,11 @@ def build_custom_term_recognizer(terms: list[str]) -> PatternRecognizer:
     if not terms:
         raise ValueError("terms list must be non-empty")
 
-    pattern = "|".join(_term_pattern(t) for t in terms if t.strip())
+    filtered = [t for t in terms if t.strip()]
+    if not filtered:
+        raise ValueError("all terms are empty or whitespace-only")
+
+    pattern = "|".join(_term_pattern(t) for t in filtered)
     return PatternRecognizer(
         supported_entity="CUSTOM_TERM",
         patterns=[Pattern(

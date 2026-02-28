@@ -15,10 +15,9 @@ class ImageSanitizer(Sanitizer):
     def sanitize(self, detections: list[Detection], output_path: Path, session) -> SanitizeResult:
         try:
             with Image.open(str(self.path)) as img:
-                # Strip all metadata by saving without info dict
-                data = list(img.getdata())
-                clean = Image.new(img.mode, img.size)
-                clean.putdata(data)
+                # Copy pixel data without metadata (avoids massive list allocation)
+                clean = img.copy()
+                clean.info = {}  # strip all metadata
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 # Preserve format
                 fmt = img.format or "PNG"

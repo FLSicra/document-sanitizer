@@ -1,6 +1,7 @@
 from pathlib import Path
 from sanitizers.base import Detection, SanitizeResult, Sanitizer
 from detectors.engine import analyze_text
+from utils.streaming import check_zip_bomb
 
 
 class ODFSanitizer(Sanitizer):
@@ -21,6 +22,7 @@ class ODFSanitizer(Sanitizer):
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
     ) -> list[Detection]:
+        check_zip_bomb(self.path)
         from odf.opendocument import load
         doc = load(str(self.path))
         detections = []
@@ -45,6 +47,7 @@ class ODFSanitizer(Sanitizer):
         return detections
 
     def sanitize(self, detections: list[Detection], output_path: Path, session) -> SanitizeResult:
+        check_zip_bomb(self.path)
         try:
             from odf.opendocument import load
             doc = load(str(self.path))

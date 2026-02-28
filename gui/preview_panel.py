@@ -128,6 +128,7 @@ class PreviewPanel(QWidget):
         self._table.setSortingEnabled(False)
         self._table.setUpdatesEnabled(False)
         for d in display:
+            det_index = len(self._detections)
             self._detections.append((filename, d))
             row = self._table.rowCount()
             self._table.insertRow(row)
@@ -148,8 +149,8 @@ class PreviewPanel(QWidget):
             for col, item in enumerate(items):
                 item.setBackground(bg)
                 item.setForeground(fg)
-                # Store detection and filename in every item for retrieval after sorting
-                item.setData(DETECTION_ROLE, id(d))
+                # Store detection list index for retrieval after sorting
+                item.setData(DETECTION_ROLE, det_index)
                 item.setData(FILENAME_ROLE, filename)
                 self._table.setItem(row, col, item)
 
@@ -182,10 +183,9 @@ class PreviewPanel(QWidget):
         item = self._table.item(row, 0)
         if item is None:
             return None
-        det_id = item.data(DETECTION_ROLE)
-        for _, d in self._detections:
-            if id(d) == det_id:
-                return d
+        det_index = item.data(DETECTION_ROLE)
+        if det_index is not None and 0 <= det_index < len(self._detections):
+            return self._detections[det_index][1]
         return None
 
     def _on_selection_changed(self):

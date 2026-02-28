@@ -63,16 +63,21 @@ class TextSanitizer(Sanitizer):
             return SanitizeResult(source_path=self.path, error=str(e))
 
 
-def _walk_strings(obj, path=""):
+_MAX_DEPTH = 200
+
+
+def _walk_strings(obj, path="", _depth=0):
     """Recursively yield (json_path, string_value) for all string leaves."""
+    if _depth > _MAX_DEPTH:
+        return
     if isinstance(obj, str):
         yield path, obj
     elif isinstance(obj, dict):
         for k, v in obj.items():
-            yield from _walk_strings(v, f"{path}.{k}" if path else k)
+            yield from _walk_strings(v, f"{path}.{k}" if path else k, _depth + 1)
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
-            yield from _walk_strings(v, f"{path}[{i}]")
+            yield from _walk_strings(v, f"{path}[{i}]", _depth + 1)
 
 
 def _replace_in_value(value: str, detections: list[Detection], session) -> str:
@@ -142,15 +147,17 @@ class JsonSanitizer(Sanitizer):
                 if d.redact:
                     det_map[d.page_or_line].append(d)
 
-            def replace_in_obj(obj, path=""):
+            def replace_in_obj(obj, path="", _depth=0):
+                if _depth > _MAX_DEPTH:
+                    return obj
                 if isinstance(obj, str):
                     dets = det_map.get(path, [])
                     return _replace_in_value(obj, dets, session) if dets else obj
                 elif isinstance(obj, dict):
-                    return {k: replace_in_obj(v, f"{path}.{k}" if path else k)
+                    return {k: replace_in_obj(v, f"{path}.{k}" if path else k, _depth + 1)
                             for k, v in obj.items()}
                 elif isinstance(obj, list):
-                    return [replace_in_obj(v, f"{path}[{i}]") for i, v in enumerate(obj)]
+                    return [replace_in_obj(v, f"{path}[{i}]", _depth + 1) for i, v in enumerate(obj)]
                 return obj
 
             sanitized = replace_in_obj(data)

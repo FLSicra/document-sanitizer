@@ -1,6 +1,6 @@
 """Resolve the spaCy model name/path for both normal and PyInstaller-frozen execution."""
-import os
 import sys
+from pathlib import Path
 
 
 def get_spacy_model_name() -> str:
@@ -17,13 +17,12 @@ def get_spacy_model_name() -> str:
     except ImportError:
         pass
 
-    base = sys._MEIPASS
-    model_root = os.path.join(base, "en_core_web_lg")
-    if os.path.isdir(model_root):
+    base = Path(sys._MEIPASS)
+    model_root = base / "en_core_web_lg"
+    if model_root.is_dir():
         # The versioned subdirectory contains config.cfg
-        for entry in os.listdir(model_root):
-            candidate = os.path.join(model_root, entry)
-            if os.path.isfile(os.path.join(candidate, "config.cfg")):
-                return candidate
-        return model_root
+        for entry in model_root.iterdir():
+            if entry.is_dir() and (entry / "config.cfg").is_file():
+                return str(entry)
+        return str(model_root)
     return "en_core_web_lg"

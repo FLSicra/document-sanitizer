@@ -1,3 +1,4 @@
+import io
 import re
 from pathlib import Path
 from sanitizers.base import (
@@ -5,6 +6,7 @@ from sanitizers.base import (
     extract_company_roots, find_company_root_hits,
 )
 from detectors.engine import analyze_text
+from utils.streaming import check_zip_bomb
 
 
 def _clear_para_content_docx(para) -> None:
@@ -62,8 +64,8 @@ def _replace_in_runs(para, detections: list[Detection], session) -> None:
         affected: list[tuple[int, int, object]] = []
         for i, run in enumerate(runs):
             rs = run_starts[i]
-            re = rs + len(run.text)
-            if rs < d.end and re > d.start:
+            run_end = rs + len(run.text)
+            if rs < d.end and run_end > d.start:
                 affected.append((i, rs, run))
 
         if not affected:
@@ -122,9 +124,11 @@ class OfficeSanitizer(Sanitizer):
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
     ) -> list[Detection]:
+        check_zip_bomb(self.path)
         return self._get_handler().detect(custom_terms, enabled_entities)
 
     def sanitize(self, detections: list[Detection], output_path: Path, session) -> SanitizeResult:
+        check_zip_bomb(self.path)
         try:
             result = self._get_handler().sanitize(detections, output_path, session)
             result.source_path = self.path
@@ -161,7 +165,8 @@ class _DocxHandler:
         enabled_entities: frozenset[str] | None = None,
     ) -> list[Detection]:
         from docx import Document
-        doc = Document(str(self.path))
+        with open(str(self.path), "rb") as f:
+            doc = Document(io.BytesIO(f.read()))
         paragraphs = [(para.text, context) for para, context in self._iter_paragraphs(doc)]
         detections = []
         for text, context in paragraphs:
@@ -175,7 +180,8 @@ class _DocxHandler:
 
     def sanitize(self, detections: list[Detection], output_path: Path, session) -> SanitizeResult:
         from docx import Document
-        doc = Document(str(self.path))
+        with open(str(self.path), "rb") as f:
+            doc = Document(io.BytesIO(f.read()))
         detection_map: dict[str, list[Detection]] = {}
         for d in detections:
             detection_map.setdefault(d.page_or_line, []).append(d)
@@ -207,14 +213,16 @@ class _XlsxHandler:
         enabled_entities: frozenset[str] | None = None,
     ) -> list[Detection]:
         from openpyxl import load_workbook
-        wb = load_workbook(str(self.path), read_only=True, data_only=True)
         cells = []
-        for sheet in wb.worksheets:
-            for row in sheet.iter_rows():
-                for cell in row:
-                    if cell.value and isinstance(cell.value, str):
-                        cells.append((cell.value, f"{sheet.title}!{cell.coordinate}"))
-        wb.close()
+        wb = load_workbook(str(self.path), read_only=True, data_only=True)
+        try:
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows():
+                    for cell in row:
+                        if cell.value and isinstance(cell.value, str):
+                            cells.append((cell.value, f"{sheet.title}!{cell.coordinate}"))
+        finally:
+            wb.close()
         detections = []
         for text, context in cells:
             detections.extend(_collect_detections_from_text(text, context, custom_terms, enabled_entities))
@@ -226,47 +234,52 @@ class _XlsxHandler:
         # Second pass: scan for dangerous Excel formulas that make external requests.
         # Load without data_only=True to read raw formula text.
         wb_raw = load_workbook(str(self.path), read_only=True, data_only=False)
-        for sheet in wb_raw.worksheets:
-            for row in sheet.iter_rows():
-                for cell in row:
-                    if not (cell.value and isinstance(cell.value, str) and cell.value.startswith("=")):
-                        continue
-                    v = cell.value
-                    vupper = v.upper()
-                    if (
-                        vupper.startswith(("=IMAGE(", "=WEBSERVICE(", "=FILTERXML(", "=IMPORTDATA("))
-                        or re.search(r"=.*https?://", v, re.IGNORECASE)
-                    ):
-                        detections.append(Detection(
-                            entity_type="DANGEROUS_FORMULA",
-                            original_value=v,
-                            start=0,
-                            end=len(v),
-                            score=1.0,
-                            page_or_line=f"{sheet.title}!{cell.coordinate}",
-                            redact=False,
-                        ))
-        wb_raw.close()
+        try:
+            for sheet in wb_raw.worksheets:
+                for row in sheet.iter_rows():
+                    for cell in row:
+                        if not (cell.value and isinstance(cell.value, str) and cell.value.startswith("=")):
+                            continue
+                        v = cell.value
+                        vupper = v.upper()
+                        if (
+                            vupper.startswith(("=IMAGE(", "=WEBSERVICE(", "=FILTERXML(", "=IMPORTDATA("))
+                            or re.search(r"=.*https?://", v, re.IGNORECASE)
+                        ):
+                            detections.append(Detection(
+                                entity_type="DANGEROUS_FORMULA",
+                                original_value=v,
+                                start=0,
+                                end=len(v),
+                                score=1.0,
+                                page_or_line=f"{sheet.title}!{cell.coordinate}",
+                                redact=True,
+                            ))
+        finally:
+            wb_raw.close()
         return detections
 
     def sanitize(self, detections: list[Detection], output_path: Path, session) -> SanitizeResult:
         from openpyxl import load_workbook
         wb = load_workbook(str(self.path))
-        detection_map: dict[str, list[Detection]] = {}
-        for d in detections:
-            detection_map.setdefault(d.page_or_line, []).append(d)
+        try:
+            detection_map: dict[str, list[Detection]] = {}
+            for d in detections:
+                detection_map.setdefault(d.page_or_line, []).append(d)
 
-        for sheet in wb.worksheets:
-            for row in sheet.iter_rows():
-                for cell in row:
-                    if cell.value and isinstance(cell.value, str):
-                        key = f"{sheet.title}!{cell.coordinate}"
-                        cell_detections = detection_map.get(key, [])
-                        if cell_detections:
-                            cell.value = _replace_in_text(cell.value, cell_detections, session)
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows():
+                    for cell in row:
+                        if cell.value and isinstance(cell.value, str):
+                            key = f"{sheet.title}!{cell.coordinate}"
+                            cell_detections = detection_map.get(key, [])
+                            if cell_detections:
+                                cell.value = _replace_in_text(cell.value, cell_detections, session)
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        wb.save(str(output_path))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            wb.save(str(output_path))
+        finally:
+            wb.close()
         return SanitizeResult(source_path=self.path, output_path=output_path, detections=detections)
 
 
@@ -280,13 +293,17 @@ class _PptxHandler:
         enabled_entities: frozenset[str] | None = None,
     ) -> list[Detection]:
         from pptx import Presentation
-        prs = Presentation(str(self.path))
+        with open(str(self.path), "rb") as f:
+            prs = Presentation(io.BytesIO(f.read()))
         paragraphs = []
         for slide_idx, slide in enumerate(prs.slides, start=1):
             for shape in slide.shapes:
                 if shape.has_text_frame:
-                    for para_idx, para in enumerate(shape.text_frame.paragraphs):
-                        paragraphs.append((para.text, f"slide {slide_idx} para {para_idx+1}"))
+                    try:
+                        for para_idx, para in enumerate(shape.text_frame.paragraphs):
+                            paragraphs.append((para.text, f"slide {slide_idx} para {para_idx+1}"))
+                    except (AttributeError, KeyError):
+                        continue
         detections = []
         for text, context in paragraphs:
             detections.extend(_collect_detections_from_text(text, context, custom_terms, enabled_entities))
@@ -299,7 +316,8 @@ class _PptxHandler:
 
     def sanitize(self, detections: list[Detection], output_path: Path, session) -> SanitizeResult:
         from pptx import Presentation
-        prs = Presentation(str(self.path))
+        with open(str(self.path), "rb") as f:
+            prs = Presentation(io.BytesIO(f.read()))
         detection_map: dict[str, list[Detection]] = {}
         for d in detections:
             detection_map.setdefault(d.page_or_line, []).append(d)

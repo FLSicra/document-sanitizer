@@ -1,4 +1,5 @@
 from __future__ import annotations
+import zipfile
 from pathlib import Path
 from typing import Callable
 from detectors.engine import analyze_text
@@ -7,10 +8,27 @@ from sanitizers.base import Detection
 DEFAULT_CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per read
 LARGE_FILE_THRESHOLD = 50 * 1024 * 1024  # 50 MB
 WINDOW_OVERLAP = 512  # char overlap between chunks to catch boundary-spanning entities
+MAX_DECOMPRESSED_SIZE = 500 * 1024 * 1024  # 500 MB zip bomb guard
 
 
 def is_large_file(path: Path) -> bool:
     return path.stat().st_size > LARGE_FILE_THRESHOLD
+
+
+def check_zip_bomb(path: Path) -> None:
+    """Raise ValueError if a ZIP-based document would decompress to an unsafe size."""
+    if not zipfile.is_zipfile(str(path)):
+        return
+    total = 0
+    with zipfile.ZipFile(str(path), 'r') as zf:
+        for info in zf.infolist():
+            total += info.file_size
+            if total > MAX_DECOMPRESSED_SIZE:
+                limit_mb = MAX_DECOMPRESSED_SIZE // (1024 * 1024)
+                raise ValueError(
+                    f"'{path.name}' exceeds the {limit_mb} MB decompressed size "
+                    f"limit (possible zip bomb)"
+                )
 
 
 def stream_detect_text(

@@ -1,4 +1,6 @@
 from __future__ import annotations
+import os
+import platform
 from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
@@ -19,7 +21,7 @@ from vault.restore import restore_file
 
 class AnalyzeWorker(QObject):
     progress = Signal(int)
-    file_done = Signal(str)             # filename only — detections stored in results dict
+    file_done = Signal(str, list)       # filename + detections passed through signal
     finished = Signal()
     error = Signal(str, str)
 
@@ -28,19 +30,22 @@ class AnalyzeWorker(QObject):
         self.paths = paths
         self.custom_terms = custom_terms
         self.enabled_entities = enabled_entities
-        self.results: dict[str, list] = {}
+        self._canceled = False
+
+    def cancel(self):
+        self._canceled = True
 
     def run(self):
-        import traceback
         total = len(self.paths)
         for i, path in enumerate(self.paths):
+            if self._canceled:
+                break
             try:
                 sanitizer = get_sanitizer(path)
                 detections = sanitizer.detect(self.custom_terms, self.enabled_entities)
-                self.results[path.name] = detections
-                self.file_done.emit(path.name)
+                self.file_done.emit(str(path), detections)
             except Exception as e:
-                self.error.emit(path.name, traceback.format_exc())
+                self.error.emit(path.name, f"{type(e).__name__}: {e}")
             self.progress.emit(int((i + 1) * 100 / total))
         self.finished.emit()
 
@@ -63,26 +68,72 @@ class SanitizeWorker(QObject):
         self.detections_map = detections_map
         self.output_dir = output_dir
         self.vault_password = vault_password
+        self._canceled = False
+
+    def cancel(self):
+        self._canceled = True
 
     def run(self):
-        import traceback
+        password = self.vault_password
+        self.vault_password = None  # clear from worker object immediately
         total = len(self.files)
         for i, file_path in enumerate(self.files):
+            if self._canceled:
+                break
             try:
-                detections = self.detections_map.get(file_path.name, [])
+                detections = self.detections_map.get(str(file_path), [])
                 sanitizer = get_sanitizer(file_path)
                 stem = file_path.stem + "_sanitized"
                 out_path = self.output_dir / (stem + file_path.suffix)
                 session = SanitizeSession()
                 result = sanitizer.sanitize(detections, out_path, session)
-                if result.success and self.vault_password:
+                if result.success and password:
                     vault_path = self.output_dir / (stem + ".vault")
-                    session.save_vault(vault_path, self.vault_password)
+                    session.save_vault(vault_path, password)
                 self.file_done.emit(file_path.name)
             except Exception as e:
-                self.error.emit(file_path.name, traceback.format_exc())
+                self.error.emit(file_path.name, f"{type(e).__name__}: {e}")
             self.progress.emit(int((i + 1) * 100 / total))
         self.finished.emit()
+
+
+class RestoreWorker(QObject):
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, sanitized_path: Path, vault_path: Path, password: str, output_path: Path):
+        super().__init__()
+        self.sanitized_path = sanitized_path
+        self.vault_path = vault_path
+        self.password = password
+        self.output_path = output_path
+        self._canceled = False
+
+    def cancel(self):
+        self._canceled = True
+
+    def run(self):
+        try:
+            restore_file(self.sanitized_path, self.vault_path, self.password, self.output_path)
+        except Exception as e:
+            self.error.emit(f"{type(e).__name__}: {e}")
+            self.finished.emit()
+            return
+        self.finished.emit()
+
+
+def _default_output_dir() -> Path:
+    """Return a sensible default output directory across platforms."""
+    if platform.system() == "Linux":
+        xdg = os.environ.get("XDG_DOCUMENTS_DIR")
+        if xdg:
+            p = Path(xdg)
+            if p.is_dir():
+                return p
+    docs = Path.home() / "Documents"
+    if docs.is_dir():
+        return docs
+    return Path.home()
 
 
 def _separator() -> QFrame:
@@ -101,7 +152,9 @@ class MainWindow(QMainWindow):
         self._detections_map: dict[str, list] = {}
         self._threads: list[QThread] = []
         self._workers: list[QObject] = []
-        self._analyzing = False
+        self._thread_worker_map: dict[QThread, QObject] = {}
+        self._busy = False
+        self._batch_errors: list[tuple[str, str]] = []  # (filename, error) pairs
         theme.apply_theme(False)  # start in light mode
         self._setup_ui()
 
@@ -173,7 +226,8 @@ class MainWindow(QMainWindow):
         self._output_combo.setEditable(True)
         self._output_combo.setFixedHeight(32)
         self._output_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._output_combo.addItem(str(Path.home() / "Documents"), str(Path.home() / "Documents"))
+        default_out = _default_output_dir()
+        self._output_combo.addItem(str(default_out), str(default_out))
         for label, path in get_onedrive_options():
             self._output_combo.addItem(label, str(path))
         tb_layout.addWidget(self._output_combo, stretch=1)
@@ -290,19 +344,29 @@ class MainWindow(QMainWindow):
 
     def _update_buttons(self):
         has_files = bool(self._files)
-        all_analyzed = has_files and all(f.name in self._detections_map for f in self._files)
-        self._analyze_btn.setEnabled(has_files and not self._analyzing)
-        self._sanitize_btn.setEnabled(all_analyzed and not self._analyzing)
-        self._remove_btn.setEnabled(has_files)
+        all_analyzed = has_files and all(str(f) in self._detections_map for f in self._files)
+        self._add_btn.setEnabled(not self._busy)
+        self._remove_btn.setEnabled(has_files and not self._busy)
+        self._analyze_btn.setEnabled(has_files and not self._busy)
+        self._sanitize_btn.setEnabled(all_analyzed and not self._busy)
+        self._settings_panel.setEnabled(not self._busy)
 
     # ------------------------------------------------------------------
     # File management
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _norm_key(p: Path) -> str:
+        """Return a case-normalized resolved path string for dedup on Windows."""
+        return os.path.normcase(str(p.resolve()))
+
     def _add_files(self):
         paths = pick_files(self)
+        existing = {self._norm_key(f) for f in self._files}
         for p in paths:
-            if p not in self._files and is_supported(p):
+            key = self._norm_key(p)
+            if key not in existing and is_supported(p):
+                existing.add(key)
                 self._files.append(p)
                 self._file_list.addItem(p.name)
         self._update_buttons()
@@ -310,20 +374,20 @@ class MainWindow(QMainWindow):
     def _remove_file(self):
         row = self._file_list.currentRow()
         if row >= 0:
-            name = self._files[row].name
+            key = str(self._files[row])
             self._files.pop(row)
             self._file_list.takeItem(row)
-            self._detections_map.pop(name, None)
+            self._detections_map.pop(key, None)
             self._preview.clear()
         self._update_buttons()
 
     def _on_file_selected(self, row: int):
         if row < 0 or row >= len(self._files):
             return
-        name = self._files[row].name
+        key = str(self._files[row])
         self._preview.clear()
-        if name in self._detections_map:
-            self._preview.load_detections(name, self._detections_map[name])
+        if key in self._detections_map:
+            self._preview.load_detections(self._files[row].name, self._detections_map[key])
 
     # ------------------------------------------------------------------
     # Step 1 — Analyze
@@ -335,7 +399,8 @@ class MainWindow(QMainWindow):
         # Re-analyze all (in case settings changed)
         self._detections_map.clear()
         self._preview.clear()
-        self._analyzing = True
+        self._batch_errors.clear()
+        self._busy = True
         self._update_buttons()
 
         custom_terms = tuple(self._settings_panel.get_custom_terms())
@@ -349,7 +414,8 @@ class MainWindow(QMainWindow):
         worker.error.connect(self._on_analyze_error)
         worker.finished.connect(thread.quit)
         thread.finished.connect(self._on_analyze_finished)
-        thread.finished.connect(lambda: self._cleanup_thread(thread, worker))
+        thread.finished.connect(self._cleanup_thread)
+        self._thread_worker_map[thread] = worker
         self._threads.append(thread)
         self._workers.append(worker)
 
@@ -363,14 +429,8 @@ class MainWindow(QMainWindow):
     def _on_analyze_progress(self, value: int):
         self._progress.setValue(value)
 
-    def _on_file_analyzed(self, filename: str):
-        # Pull detections from worker (avoids passing complex objects through Qt signals)
-        detections = []
-        for w in self._workers:
-            if isinstance(w, AnalyzeWorker) and filename in w.results:
-                detections = w.results.pop(filename)
-                break
-        self._detections_map[filename] = detections
+    def _on_file_analyzed(self, file_key: str, detections: list):
+        self._detections_map[file_key] = detections
         done = len(self._detections_map)
         total = len(self._files)
         self._status_label.setText(
@@ -378,30 +438,34 @@ class MainWindow(QMainWindow):
         )
         # Show detections for currently selected file
         row = self._file_list.currentRow()
-        if 0 <= row < len(self._files) and self._files[row].name == filename:
+        if 0 <= row < len(self._files) and str(self._files[row]) == file_key:
+            display_name = self._files[row].name
             self._preview.clear()
-            self._preview.load_detections(filename, detections)
-        self.statusBar().showMessage(f"Analyzed: {filename} — {len(detections)} finding(s)")
+            self._preview.load_detections(display_name, detections)
+        display_name = Path(file_key).name
+        self.statusBar().showMessage(f"Analyzed: {display_name} — {len(detections)} finding(s)")
 
     def _on_analyze_error(self, filename: str, error: str):
+        self._batch_errors.append((filename, error))
         self._status_label.setText(f"Error in {filename}")
         self._status_label.setStyleSheet("color: #c62828; font-style: italic;")
-        QMessageBox.critical(
-            self, f"Analysis failed — {filename}",
-            f"File: {filename}\n\nError:\n{error}"
-        )
 
-    def _cleanup_thread(self, thread, worker):
+    def _cleanup_thread(self):
         """Remove a thread/worker pair only after the thread has fully stopped."""
+        thread = self.sender()
+        if not isinstance(thread, QThread):
+            return
+        worker = self._thread_worker_map.pop(thread, None)
         if thread in self._threads:
             self._threads.remove(thread)
-        if worker in self._workers:
+        if worker and worker in self._workers:
             self._workers.remove(worker)
         thread.deleteLater()
-        worker.deleteLater()
+        if worker:
+            worker.deleteLater()
 
     def _on_analyze_finished(self):
-        self._analyzing = False
+        self._busy = False
         self._status_row.setVisible(False)
         total = sum(len(v) for v in self._detections_map.values())
         self.statusBar().showMessage(
@@ -412,6 +476,13 @@ class MainWindow(QMainWindow):
         if self._file_list.currentRow() < 0 and self._files:
             self._file_list.setCurrentRow(0)
         self._update_buttons()
+        if self._batch_errors:
+            summary = "\n".join(f"• {name}: {err}" for name, err in self._batch_errors)
+            QMessageBox.warning(
+                self, f"Analysis errors ({len(self._batch_errors)} file(s))",
+                f"The following files could not be analyzed:\n\n{summary}",
+            )
+            self._batch_errors.clear()
 
     # ------------------------------------------------------------------
     # Step 2 — Sanitize
@@ -447,9 +518,29 @@ class MainWindow(QMainWindow):
         if not ok:
             return
 
+        if password:
+            if len(password) < 8:
+                QMessageBox.warning(
+                    self, "Weak password",
+                    "Vault password must be at least 8 characters long.",
+                )
+                return
+            confirm, ok2 = QInputDialog.getText(
+                self, "Confirm vault password",
+                "Re-enter the vault password to confirm:",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok2 or confirm != password:
+                QMessageBox.warning(
+                    self, "Password mismatch",
+                    "The passwords do not match. Sanitization cancelled.",
+                )
+                return
+
+        self._batch_errors.clear()
         worker = SanitizeWorker(
             files=list(self._files),
-            detections_map={n: list(d) for n, d in self._detections_map.items()},
+            detections_map={k: list(d) for k, d in self._detections_map.items()},
             output_dir=output_dir,
             vault_password=password,
         )
@@ -461,33 +552,40 @@ class MainWindow(QMainWindow):
         worker.error.connect(self._on_sanitize_error)
         worker.finished.connect(thread.quit)
         thread.finished.connect(self._on_sanitize_done)
-        thread.finished.connect(lambda: self._cleanup_thread(thread, worker))
+        thread.finished.connect(self._cleanup_thread)
 
-        self._analyzing = True   # lock buttons during sanitize too
+        self._busy = True
         self._update_buttons()
         self._status_label.setStyleSheet("color: #1565c0; font-style: italic;")
         self._status_label.setText(f"Sanitizing {len(self._files)} file(s) — please wait…")
         self._status_row.setVisible(True)
         self._progress.setValue(0)
+        self._thread_worker_map[thread] = worker
         self._threads.append(thread)
         self._workers.append(worker)
         thread.start()
 
     def _on_sanitize_error(self, filename: str, error: str):
-        QMessageBox.critical(
-            self, f"Sanitization failed — {filename}",
-            f"File: {filename}\n\nError:\n{error}"
-        )
+        self._batch_errors.append((filename, error))
 
     def _on_sanitize_done(self):
-        self._analyzing = False
+        self._busy = False
         self._status_row.setVisible(False)
         self._update_buttons()
         output_dir = Path(self._output_combo.currentText().strip())
-        QMessageBox.information(
-            self, "Done",
-            f"Sanitization complete.\nFiles saved to:\n{output_dir}"
-        )
+        if self._batch_errors:
+            summary = "\n".join(f"• {name}: {err}" for name, err in self._batch_errors)
+            QMessageBox.warning(
+                self, f"Sanitization errors ({len(self._batch_errors)} file(s))",
+                f"Sanitization finished with errors:\n\n{summary}\n\n"
+                f"Successfully processed files saved to:\n{output_dir}",
+            )
+            self._batch_errors.clear()
+        else:
+            QMessageBox.information(
+                self, "Done",
+                f"Sanitization complete.\nFiles saved to:\n{output_dir}"
+            )
 
     # ------------------------------------------------------------------
     # Settings
@@ -500,10 +598,10 @@ class MainWindow(QMainWindow):
         # Re-render the preview table so severity colours update
         row = self._file_list.currentRow()
         if 0 <= row < len(self._files):
-            name = self._files[row].name
-            if name in self._detections_map:
+            key = str(self._files[row])
+            if key in self._detections_map:
                 self._preview.clear()
-                self._preview.load_detections(name, self._detections_map[name])
+                self._preview.load_detections(self._files[row].name, self._detections_map[key])
 
     def _on_settings_changed(self):
         from detectors.engine import invalidate_cache
@@ -551,8 +649,43 @@ class MainWindow(QMainWindow):
         )
         if not ok:
             return
-        try:
-            restore_file(Path(doc), Path(vault), password, Path(out))
-            QMessageBox.information(self, "Done", f"Restored file saved to:\n{out}")
-        except Exception as e:
-            QMessageBox.critical(self, "Restore failed", str(e))
+
+        self._restore_error: str | None = None
+        self._restore_out_path = out
+        worker = RestoreWorker(Path(doc), Path(vault), password, Path(out))
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.error.connect(self._on_restore_error)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(self._on_restore_done)
+        thread.finished.connect(self._cleanup_thread)
+        self._thread_worker_map[thread] = worker
+        self._threads.append(thread)
+        self._workers.append(worker)
+        self.statusBar().showMessage("Restoring document — please wait…")
+        thread.start()
+
+    def _on_restore_error(self, error: str):
+        self._restore_error = error
+
+    def _on_restore_done(self):
+        if self._restore_error:
+            QMessageBox.critical(self, "Restore failed", self._restore_error)
+            self._restore_error = None
+        else:
+            QMessageBox.information(self, "Done", f"Restored file saved to:\n{self._restore_out_path}")
+        self.statusBar().clearMessage()
+
+    # ------------------------------------------------------------------
+    # Window close — stop background threads safely
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event):
+        for w in self._workers:
+            if hasattr(w, 'cancel'):
+                w.cancel()
+        for t in self._threads:
+            t.quit()
+            t.wait(5000)
+        event.accept()

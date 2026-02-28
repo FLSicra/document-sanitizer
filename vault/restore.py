@@ -1,4 +1,5 @@
 from __future__ import annotations
+import io
 import re
 from pathlib import Path
 from vault.vault import SanitizeSession
@@ -51,7 +52,8 @@ def _restore_text_file(src: Path, dst: Path, token_map: dict[str, str]) -> None:
 
 def _restore_docx(src: Path, dst: Path, token_map: dict[str, str]) -> None:
     from docx import Document
-    doc = Document(str(src))
+    with open(str(src), "rb") as f:
+        doc = Document(io.BytesIO(f.read()))
     for para in doc.paragraphs:
         for run in para.runs:
             run.text = restore_text(run.text, token_map)
@@ -84,18 +86,22 @@ def _restore_docx(src: Path, dst: Path, token_map: dict[str, str]) -> None:
 def _restore_xlsx(src: Path, dst: Path, token_map: dict[str, str]) -> None:
     from openpyxl import load_workbook
     wb = load_workbook(str(src))
-    for sheet in wb.worksheets:
-        for row in sheet.iter_rows():
-            for cell in row:
-                if isinstance(cell.value, str):
-                    cell.value = restore_text(cell.value, token_map)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(dst))
+    try:
+        for sheet in wb.worksheets:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if isinstance(cell.value, str):
+                        cell.value = restore_text(cell.value, token_map)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(str(dst))
+    finally:
+        wb.close()
 
 
 def _restore_pptx(src: Path, dst: Path, token_map: dict[str, str]) -> None:
     from pptx import Presentation
-    prs = Presentation(str(src))
+    with open(str(src), "rb") as f:
+        prs = Presentation(io.BytesIO(f.read()))
     for slide in prs.slides:
         for shape in slide.shapes:
             if shape.has_text_frame:
