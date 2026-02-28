@@ -376,7 +376,7 @@ class TestXlsxSanitizer:
         detections = OfficeSanitizer(src).detect()
         assert any(d.entity_type == "DANGEROUS_FORMULA" for d in detections)
 
-    def test_xlsx_dangerous_formula_not_redacted(self, tmp_path):
+    def test_xlsx_dangerous_formula_redacted_by_default(self, tmp_path):
         from openpyxl import Workbook
         src = tmp_path / "formulas.xlsx"
         wb = Workbook()
@@ -387,7 +387,7 @@ class TestXlsxSanitizer:
         detections = OfficeSanitizer(src).detect()
         formula_hits = [d for d in detections if d.entity_type == "DANGEROUS_FORMULA"]
         assert formula_hits
-        assert all(d.redact is False for d in formula_hits)
+        assert all(d.redact is True for d in formula_hits)
 
     def test_xlsx_multisheet_detect(self, tmp_path):
         from openpyxl import Workbook
