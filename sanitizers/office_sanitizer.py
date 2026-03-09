@@ -4,6 +4,7 @@ from pathlib import Path
 from sanitizers.base import (
     Detection, SanitizeResult, Sanitizer, dedup_detections,
     extract_company_roots, find_company_root_hits,
+    replace_detections_in_text,
 )
 from detectors.engine import analyze_text
 from utils.streaming import check_zip_bomb
@@ -30,13 +31,8 @@ def _clear_para_content_pptx(para) -> None:
 
 
 def _replace_in_text(text: str, detections: list[Detection], session) -> str:
-    to_redact = dedup_detections([d for d in detections if d.redact])
-    to_redact.sort(key=lambda d: d.start, reverse=True)
-    for d in to_redact:
-        token = session.get_or_create_token(d) if session else "[REDACTED]"
-        d.token = token
-        text = text[:d.start] + token + text[d.end:]
-    return text
+    """Thin wrapper around the shared replacement helper."""
+    return replace_detections_in_text(text, detections, session)
 
 
 def _replace_in_runs(para, detections: list[Detection], session) -> None:
@@ -123,6 +119,7 @@ class OfficeSanitizer(Sanitizer):
         self,
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
+        progress_callback=None,
     ) -> list[Detection]:
         check_zip_bomb(self.path)
         return self._get_handler().detect(custom_terms, enabled_entities)
@@ -163,6 +160,7 @@ class _DocxHandler:
         self,
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
+        progress_callback=None,
     ) -> list[Detection]:
         from docx import Document
         with open(str(self.path), "rb") as f:
@@ -182,6 +180,10 @@ class _DocxHandler:
         from docx import Document
         with open(str(self.path), "rb") as f:
             doc = Document(io.BytesIO(f.read()))
+        if session is not None:
+            session.initialize_from_content(
+                [para.text for para, _ in self._iter_paragraphs(doc)]
+            )
         detection_map: dict[str, list[Detection]] = {}
         for d in detections:
             detection_map.setdefault(d.page_or_line, []).append(d)
@@ -198,9 +200,16 @@ class _DocxHandler:
                         _clear_para_content_docx(para)
                         para.add_run(new_text)
 
+        layout_warnings = [
+            f"Token longer than original in '{d.page_or_line}' — table layout may shift."
+            for d in detections
+            if d.redact and d.token and len(d.token) - len(d.original_value) > 10
+        ]
         output_path.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(output_path))
-        return SanitizeResult(source_path=self.path, output_path=output_path, detections=detections)
+        result = SanitizeResult(source_path=self.path, output_path=output_path, detections=detections)
+        result.warnings = layout_warnings
+        return result
 
 
 class _XlsxHandler:
@@ -211,16 +220,25 @@ class _XlsxHandler:
         self,
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
+        progress_callback=None,
     ) -> list[Detection]:
         from openpyxl import load_workbook
         cells = []
-        wb = load_workbook(str(self.path), read_only=True, data_only=True)
+        formulas = []
+        # Single load with data_only=False: literal string cells keep their
+        # values, and formula cells expose raw formula text for inspection.
+        wb = load_workbook(str(self.path), read_only=True, data_only=False)
         try:
             for sheet in wb.worksheets:
                 for row in sheet.iter_rows():
                     for cell in row:
-                        if cell.value and isinstance(cell.value, str):
-                            cells.append((cell.value, f"{sheet.title}!{cell.coordinate}"))
+                        if not (cell.value and isinstance(cell.value, str)):
+                            continue
+                        coord = f"{sheet.title}!{cell.coordinate}"
+                        if cell.value.startswith("="):
+                            formulas.append((cell.value, coord))
+                        else:
+                            cells.append((cell.value, coord))
         finally:
             wb.close()
         detections = []
@@ -231,38 +249,37 @@ class _XlsxHandler:
             for text, context in cells:
                 detections.extend(find_company_root_hits(text, roots, context))
             detections = dedup_detections(detections)
-        # Second pass: scan for dangerous Excel formulas that make external requests.
-        # Load without data_only=True to read raw formula text.
-        wb_raw = load_workbook(str(self.path), read_only=True, data_only=False)
-        try:
-            for sheet in wb_raw.worksheets:
-                for row in sheet.iter_rows():
-                    for cell in row:
-                        if not (cell.value and isinstance(cell.value, str) and cell.value.startswith("=")):
-                            continue
-                        v = cell.value
-                        vupper = v.upper()
-                        if (
-                            vupper.startswith(("=IMAGE(", "=WEBSERVICE(", "=FILTERXML(", "=IMPORTDATA("))
-                            or re.search(r"=.*https?://", v, re.IGNORECASE)
-                        ):
-                            detections.append(Detection(
-                                entity_type="DANGEROUS_FORMULA",
-                                original_value=v,
-                                start=0,
-                                end=len(v),
-                                score=1.0,
-                                page_or_line=f"{sheet.title}!{cell.coordinate}",
-                                redact=True,
-                            ))
-        finally:
-            wb_raw.close()
+        # Scan for dangerous Excel formulas that make external requests.
+        for v, coord in formulas:
+            vupper = v.upper()
+            if (
+                vupper.startswith(("=IMAGE(", "=WEBSERVICE(", "=FILTERXML(", "=IMPORTDATA("))
+                or re.search(r"=.*https?://", v, re.IGNORECASE)
+            ):
+                detections.append(Detection(
+                    entity_type="DANGEROUS_FORMULA",
+                    original_value=v,
+                    start=0,
+                    end=len(v),
+                    score=1.0,
+                    page_or_line=coord,
+                    redact=True,
+                ))
         return detections
 
     def sanitize(self, detections: list[Detection], output_path: Path, session) -> SanitizeResult:
         from openpyxl import load_workbook
         wb = load_workbook(str(self.path))
         try:
+            if session is not None:
+                all_texts = [
+                    str(cell.value)
+                    for sheet in wb.worksheets
+                    for row in sheet.iter_rows()
+                    for cell in row
+                    if cell.value and isinstance(cell.value, str)
+                ]
+                session.initialize_from_content(all_texts)
             detection_map: dict[str, list[Detection]] = {}
             for d in detections:
                 detection_map.setdefault(d.page_or_line, []).append(d)
@@ -275,6 +292,12 @@ class _XlsxHandler:
                             cell_detections = detection_map.get(key, [])
                             if cell_detections:
                                 cell.value = _replace_in_text(cell.value, cell_detections, session)
+                                # Expand column width to fit the (possibly longer) token
+                                col_letter = cell.column_letter
+                                current = sheet.column_dimensions[col_letter].width or 8
+                                needed = len(cell.value) + 2
+                                if needed > current:
+                                    sheet.column_dimensions[col_letter].width = needed
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
             wb.save(str(output_path))
@@ -291,6 +314,7 @@ class _PptxHandler:
         self,
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
+        progress_callback=None,
     ) -> list[Detection]:
         from pptx import Presentation
         with open(str(self.path), "rb") as f:
@@ -318,6 +342,18 @@ class _PptxHandler:
         from pptx import Presentation
         with open(str(self.path), "rb") as f:
             prs = Presentation(io.BytesIO(f.read()))
+        if session is not None:
+            all_texts = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        try:
+                            for para in shape.text_frame.paragraphs:
+                                if para.text:
+                                    all_texts.append(para.text)
+                        except (AttributeError, KeyError):
+                            pass
+            session.initialize_from_content(all_texts)
         detection_map: dict[str, list[Detection]] = {}
         for d in detections:
             detection_map.setdefault(d.page_or_line, []).append(d)
@@ -338,6 +374,13 @@ class _PptxHandler:
                                     run = para.add_run()
                                     run.text = new_text
 
+        layout_warnings = [
+            f"Token longer than original in '{d.page_or_line}' — table layout may shift."
+            for d in detections
+            if d.redact and d.token and len(d.token) - len(d.original_value) > 10
+        ]
         output_path.parent.mkdir(parents=True, exist_ok=True)
         prs.save(str(output_path))
-        return SanitizeResult(source_path=self.path, output_path=output_path, detections=detections)
+        result = SanitizeResult(source_path=self.path, output_path=output_path, detections=detections)
+        result.warnings = layout_warnings
+        return result

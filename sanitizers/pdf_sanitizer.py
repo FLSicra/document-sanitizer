@@ -7,19 +7,48 @@ from sanitizers.base import (
 from detectors.engine import analyze_text
 
 
+def _get_page_text(page, warnings: list[str] | None = None) -> str:
+    """Return page text, falling back to OCR for image-only pages.
+
+    OCR requires Tesseract to be installed on the system.  If it is not
+    available (or any other error occurs), the function returns an empty
+    string so that the rest of the pipeline continues unaffected.
+
+    If *warnings* is provided, OCR failures are appended as human-readable
+    messages so the caller can surface them to the user.
+    """
+    text = page.get_text()
+    if text.strip():
+        return text
+    # Page has no extractable text — try OCR (Tesseract must be installed)
+    try:
+        tp = page.get_textpage_ocr(flags=3, full=True)
+        return page.get_text(textpage=tp)
+    except Exception:
+        if warnings is not None:
+            warnings.append(
+                f"Page {page.number + 1}: no extractable text and OCR unavailable — page skipped"
+            )
+        return ""
+
+
 class PDFSanitizer(Sanitizer):
     def detect(
         self,
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
+        progress_callback=None,
     ) -> list[Detection]:
         pages = []
+        ocr_warnings: list[str] = []
         doc = fitz.open(str(self.path))
         try:
             for page_num, page in enumerate(doc, start=1):
-                pages.append((page.get_text(), f"page {page_num}"))
+                pages.append((_get_page_text(page, ocr_warnings), f"page {page_num}"))
         finally:
             doc.close()
+        # Store warnings for later use (e.g. shown after sanitization)
+        self._ocr_warnings = ocr_warnings
 
         detections = []
         for text, context in pages:
@@ -45,6 +74,8 @@ class PDFSanitizer(Sanitizer):
         try:
             doc = fitz.open(str(self.path))
             try:
+                if session is not None:
+                    session.initialize_from_content([page.get_text() for page in doc])
                 for page_num, page in enumerate(doc, start=1):
                     page_detections = [
                         d for d in detections
@@ -62,6 +93,8 @@ class PDFSanitizer(Sanitizer):
                 doc.save(str(output_path), garbage=4, deflate=True)
             finally:
                 doc.close()
-            return SanitizeResult(source_path=self.path, output_path=output_path, detections=detections)
+            result = SanitizeResult(source_path=self.path, output_path=output_path, detections=detections)
+            result.warnings = getattr(self, '_ocr_warnings', [])
+            return result
         except Exception as e:
             return SanitizeResult(source_path=self.path, error=str(e))

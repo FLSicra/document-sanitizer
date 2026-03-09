@@ -8,6 +8,7 @@ class ImageSanitizer(Sanitizer):
         self,
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
+        progress_callback=None,
     ) -> list[Detection]:
         """Images have no text content to detect PII in — only metadata."""
         return []

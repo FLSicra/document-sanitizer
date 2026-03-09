@@ -24,6 +24,7 @@ class SanitizeResult:
     detections: list[Detection] = field(default_factory=list)
     vault_path: Optional[Path] = None
     error: Optional[str] = None
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -86,6 +87,26 @@ def find_company_root_hits(text: str, roots: list[str], context: str) -> list["D
     return hits
 
 
+def replace_detections_in_text(
+    text: str,
+    detections: list["Detection"],
+    session,
+) -> str:
+    """Apply redactions to *text* by splicing tokens in reverse order.
+
+    This is the shared implementation used by TextSanitizer, ODFSanitizer,
+    OfficeSanitizer, and JsonSanitizer to avoid duplicating the same
+    filter → sort → assign-token → splice logic.
+    """
+    to_redact = dedup_detections([d for d in detections if d.redact])
+    to_redact.sort(key=lambda d: d.start, reverse=True)
+    for d in to_redact:
+        token = session.get_or_create_token(d) if session else "[REDACTED]"
+        d.token = token
+        text = text[:d.start] + token + text[d.end:]
+    return text
+
+
 class Sanitizer(ABC):
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -95,6 +116,7 @@ class Sanitizer(ABC):
         self,
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
+        progress_callback: "Callable[[int], None] | None" = None,
     ) -> list[Detection]:
         """Return all detections without modifying the file."""
 

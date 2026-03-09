@@ -417,8 +417,13 @@ def analyze_text(
     text: str,
     custom_terms: tuple[str, ...] = (),
     enabled_entities: frozenset[str] | None = None,
+    progress_callback: "Callable[[int], None] | None" = None,
 ) -> list:
-    """Convenience wrapper. Splits large texts into chunks to stay within spaCy's max_length."""
+    """Convenience wrapper. Splits large texts into chunks to stay within spaCy's max_length.
+
+    *progress_callback*, when provided, is called with an int 0–100
+    representing the approximate percentage of text processed so far.
+    """
     from presidio_analyzer import RecognizerResult
     if enabled_entities is not None:
         if not enabled_entities:
@@ -438,15 +443,19 @@ def analyze_text(
         return []
     analyzer = get_analyzer(custom_terms)
     if len(text) <= _CHUNK_SIZE:
-        return _analyze_chunk(analyzer, text, entities)
+        result = _analyze_chunk(analyzer, text, entities)
+        if progress_callback:
+            progress_callback(100)
+        return result
 
+    total_len = len(text)
     results = []
     seen: set[tuple[int, int, str]] = set()
     offset = 0
-    while offset < len(text):
-        end = min(offset + _CHUNK_SIZE, len(text))
+    while offset < total_len:
+        end = min(offset + _CHUNK_SIZE, total_len)
         # Try to break on a newline near the end of the chunk
-        if end < len(text):
+        if end < total_len:
             nl = text.rfind("\n", offset + _CHUNK_SIZE // 2, end)
             if nl != -1:
                 end = nl + 1
@@ -464,7 +473,9 @@ def analyze_text(
                     score=r.score,
                 ))
         # Advance with overlap so entities spanning chunk boundaries are captured
-        offset = end - _CHUNK_OVERLAP if end < len(text) else end
+        offset = end - _CHUNK_OVERLAP if end < total_len else end
+        if progress_callback:
+            progress_callback(min(99, int(offset * 100 / total_len)))
     return results
 
 

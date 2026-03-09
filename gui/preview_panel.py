@@ -48,14 +48,15 @@ def _severity(entity_type: str) -> str:
     return "low"
 
 
-COLUMNS = ["File", "Entity Type", "Original Value", "Page/Line", "Confidence", "Redact"]
-MAX_PREVIEW_ROWS = 0  # 0 = no limit; show all detections
+COLUMNS = ["File", "Entity Type", "Original Value", "Count", "Confidence", "Redact"]
 
 
 class PreviewPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._detections: list[tuple[str, Detection]] = []  # (filename, detection)
+        self._detections: list[tuple[str, Detection]] = []  # all (filename, detection)
+        # Grouped view: each entry is (filename, [detections]) for one unique value
+        self._groups: list[tuple[str, list[Detection]]] = []
         self._checkboxes: list[QCheckBox] = []
         self._setup_ui()
 
@@ -107,57 +108,70 @@ class PreviewPanel(QWidget):
         layout.addLayout(btn_row)
 
     def load_detections(self, filename: str, detections: list[Detection]):
-        """Append detections from a file into the table."""
-        total = len(detections)
-        if MAX_PREVIEW_ROWS > 0:
-            display = detections[:MAX_PREVIEW_ROWS]
-            if total > MAX_PREVIEW_ROWS:
-                self._truncation_label.setText(
-                    f"Showing {MAX_PREVIEW_ROWS} of {total} findings. "
-                    f"All {total} will be redacted on sanitize."
-                )
-                self._truncation_label.setVisible(True)
-            else:
-                self._truncation_label.setVisible(False)
+        """Append detections from a file into the table (grouped by value)."""
+        for d in detections:
+            self._detections.append((filename, d))
+
+        # Group by (entity_type, original_value)
+        from collections import OrderedDict
+        groups: OrderedDict[tuple[str, str], list[Detection]] = OrderedDict()
+        for d in detections:
+            key = (d.entity_type, d.original_value)
+            groups.setdefault(key, []).append(d)
+
+        total_groups = len(groups)
+        total_detections = len(detections)
+        if total_groups < total_detections:
+            self._truncation_label.setText(
+                f"{total_detections} findings grouped into {total_groups} unique values. "
+                f"All {total_detections} will be redacted on sanitize."
+            )
+            self._truncation_label.setVisible(True)
         else:
-            display = detections
             self._truncation_label.setVisible(False)
 
         severity_colors = get_severity_colors()
 
         self._table.setSortingEnabled(False)
         self._table.setUpdatesEnabled(False)
-        for d in display:
-            det_index = len(self._detections)
-            self._detections.append((filename, d))
+        for (_etype, _oval), group_dets in groups.items():
+            group_index = len(self._groups)
+            self._groups.append((filename, group_dets))
             row = self._table.rowCount()
             self._table.insertRow(row)
 
-            bg, fg = severity_colors[_severity(d.entity_type)]
+            representative = group_dets[0]
+            bg, fg = severity_colors[_severity(representative.entity_type)]
+            max_score = max(d.score for d in group_dets)
 
             # Confidence uses _NumericSortItem for proper numeric sorting
-            conf_item = _NumericSortItem(f"{d.score:.0%}")
-            conf_item.setData(SORT_VALUE_ROLE, d.score)
+            conf_item = _NumericSortItem(f"{max_score:.0%}")
+            conf_item.setData(SORT_VALUE_ROLE, max_score)
+
+            # Count uses _NumericSortItem for proper numeric sorting
+            count_item = _NumericSortItem(str(len(group_dets)))
+            count_item.setData(SORT_VALUE_ROLE, len(group_dets))
 
             items = [
                 QTableWidgetItem(filename),
-                QTableWidgetItem(d.entity_type),
-                QTableWidgetItem(d.original_value),
-                QTableWidgetItem(str(d.page_or_line or "")),
+                QTableWidgetItem(representative.entity_type),
+                QTableWidgetItem(representative.original_value),
+                count_item,
                 conf_item,
             ]
             for col, item in enumerate(items):
                 item.setBackground(bg)
                 item.setForeground(fg)
-                # Store detection list index for retrieval after sorting
-                item.setData(DETECTION_ROLE, det_index)
+                item.setData(DETECTION_ROLE, group_index)
                 item.setData(FILENAME_ROLE, filename)
                 self._table.setItem(row, col, item)
 
-            # Redact checkbox
+            # Redact checkbox — toggles all detections in the group
             chk = QCheckBox()
-            chk.setChecked(d.redact)
-            chk.stateChanged.connect(lambda state, det=d: self._on_redact_changed(det, state))
+            chk.setChecked(representative.redact)
+            chk.stateChanged.connect(
+                lambda state, dets=group_dets: self._on_group_redact_changed(dets, state)
+            )
             self._checkboxes.append(chk)
             chk_widget = QWidget()
             chk_layout = QHBoxLayout(chk_widget)
@@ -171,21 +185,24 @@ class PreviewPanel(QWidget):
     def clear(self):
         self._table.setRowCount(0)
         self._detections.clear()
+        self._groups.clear()
         self._checkboxes.clear()
         self._context_view.clear()
         self._truncation_label.setVisible(False)
 
-    def _on_redact_changed(self, detection: Detection, state: int):
-        detection.redact = bool(state)
+    def _on_group_redact_changed(self, detections: list[Detection], state: int):
+        checked = bool(state)
+        for d in detections:
+            d.redact = checked
 
-    def _detection_for_row(self, row: int):
-        """Look up the Detection object for a (possibly re-sorted) table row."""
+    def _group_for_row(self, row: int) -> list[Detection] | None:
+        """Look up the Detection group for a (possibly re-sorted) table row."""
         item = self._table.item(row, 0)
         if item is None:
             return None
-        det_index = item.data(DETECTION_ROLE)
-        if det_index is not None and 0 <= det_index < len(self._detections):
-            return self._detections[det_index][1]
+        group_index = item.data(DETECTION_ROLE)
+        if group_index is not None and 0 <= group_index < len(self._groups):
+            return self._groups[group_index][1]
         return None
 
     def _on_selection_changed(self):
@@ -193,14 +210,20 @@ class PreviewPanel(QWidget):
         if not rows:
             return
         row = self._table.currentRow()
-        det = self._detection_for_row(row)
-        if det is not None:
-            self._context_view.setPlainText(
-                f"Entity: {det.entity_type}\n"
-                f"Value: {det.original_value}\n"
-                f"Location: {det.page_or_line}\n"
-                f"Confidence: {det.score:.0%}"
-            )
+        group = self._group_for_row(row)
+        if group is None:
+            return
+        rep = group[0]
+        locations = sorted({d.page_or_line for d in group if d.page_or_line})
+        loc_str = ", ".join(str(loc) for loc in locations[:20])
+        if len(locations) > 20:
+            loc_str += f" ... and {len(locations) - 20} more"
+        self._context_view.setPlainText(
+            f"Entity: {rep.entity_type}\n"
+            f"Value: {rep.original_value}\n"
+            f"Occurrences: {len(group)}\n"
+            f"Locations: {loc_str}"
+        )
 
     def _select_all(self):
         for _, det in self._detections:
@@ -217,3 +240,17 @@ class PreviewPanel(QWidget):
             chk.blockSignals(True)
             chk.setChecked(checked)
             chk.blockSignals(False)
+
+    def refresh_colors(self):
+        """Re-apply severity colours after a theme change without rebuilding."""
+        severity_colors = get_severity_colors()
+        for row in range(self._table.rowCount()):
+            group = self._group_for_row(row)
+            if group is None:
+                continue
+            bg, fg = severity_colors[_severity(group[0].entity_type)]
+            for col in range(len(COLUMNS) - 1):  # skip checkbox column
+                item = self._table.item(row, col)
+                if item is not None:
+                    item.setBackground(bg)
+                    item.setForeground(fg)

@@ -181,3 +181,22 @@ class SettingsPanel(QWidget):
 
     def get_custom_terms(self) -> list[str]:
         return list(self._custom_terms)
+
+    def get_state(self) -> dict:
+        """Return serialisable state for profile persistence."""
+        return {
+            "entities": {e: chk.isChecked() for e, chk in self._checkboxes.items()},
+            "custom_terms": list(self._custom_terms),
+        }
+
+    def load_state(self, state: dict) -> None:
+        """Restore previously saved state without emitting settings_changed."""
+        for entity, checked in state.get("entities", {}).items():
+            if entity in self._checkboxes:
+                self._checkboxes[entity].blockSignals(True)
+                self._checkboxes[entity].setChecked(checked)
+                self._checkboxes[entity].blockSignals(False)
+        for term in state.get("custom_terms", []):
+            if term not in self._custom_terms:
+                self._custom_terms.append(term)
+                self._term_list.addItem(QListWidgetItem(term))

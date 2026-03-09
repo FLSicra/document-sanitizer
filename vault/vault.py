@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import re as _re
 import stat
 import base64
 from pathlib import Path
@@ -8,6 +9,8 @@ from dataclasses import dataclass, field
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.fernet import Fernet, InvalidToken
+
+_EXISTING_TOKEN_RE = _re.compile(r'\[([A-Z][A-Z0-9_]*)_(\d+)\]')
 
 
 PBKDF2_ITERATIONS = 600_000
@@ -33,6 +36,18 @@ class SanitizeSession:
     _counters: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _value_to_token: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _token_to_value: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+
+    def initialize_from_content(self, texts: list[str]) -> None:
+        """Scan document texts for existing [TYPE_N] tokens and bump counters past them.
+
+        Prevents the sanitizer from generating tokens that already appear in the
+        document (e.g. if a document literally contains "[PERSON_1]").
+        """
+        for text in texts:
+            for m in _EXISTING_TOKEN_RE.finditer(text):
+                entity, n = m.group(1), int(m.group(2))
+                if self._counters.get(entity, 0) < n:
+                    self._counters[entity] = n
 
     def get_or_create_token(self, detection) -> str:
         """Return existing token for this value, or create a new deterministic one."""

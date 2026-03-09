@@ -44,7 +44,7 @@ def stream_detect_text(
     are still caught. progress_callback receives 0-100 int values.
     """
     total_size = path.stat().st_size
-    bytes_read = 0
+    chars_read = 0
     detections: list[Detection] = []
     global_offset = 0      # absolute char offset of process_text start
     global_line_base = 0   # newlines seen before the current process_text
@@ -55,7 +55,7 @@ def stream_detect_text(
             chunk = f.read(chunk_size)
             if not chunk:
                 break
-            bytes_read += len(chunk.encode("utf-8", errors="replace"))
+            chars_read += len(chunk)
             buffer += chunk
 
             if len(buffer) > WINDOW_OVERLAP:
@@ -76,7 +76,10 @@ def stream_detect_text(
                 buffer = buffer[-WINDOW_OVERLAP:]
 
             if progress_callback and total_size > 0:
-                progress_callback(min(99, int(bytes_read * 100 / total_size)))
+                # chars_read approximates bytes for ASCII-heavy UTF-8 content;
+                # for multi-byte text the bar may advance slightly faster, which
+                # is acceptable for a progress indicator.
+                progress_callback(min(99, int(chars_read * 100 / total_size)))
 
         # Flush remaining buffer
         if buffer:

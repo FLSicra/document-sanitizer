@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QStatusBar, QInputDialog, QMessageBox, QLineEdit, QFileDialog,
     QFrame, QSizePolicy, QSplitter,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QSettings
 from PySide6.QtGui import QFont
 from gui.file_picker import pick_files, pick_folder, get_onedrive_options
 from gui.preview_panel import PreviewPanel
@@ -40,9 +40,18 @@ class AnalyzeWorker(QObject):
         for i, path in enumerate(self.paths):
             if self._canceled:
                 break
+            file_base = int(i * 100 / total)
+            file_span = max(1, int(100 / total))
+
+            def _on_chunk_progress(pct, _base=file_base, _span=file_span):
+                self.progress.emit(min(99, _base + int(pct * _span / 100)))
+
             try:
                 sanitizer = get_sanitizer(path)
-                detections = sanitizer.detect(self.custom_terms, self.enabled_entities)
+                detections = sanitizer.detect(
+                    self.custom_terms, self.enabled_entities,
+                    progress_callback=_on_chunk_progress,
+                )
                 self.file_done.emit(str(path), detections)
             except Exception as e:
                 self.error.emit(path.name, f"{type(e).__name__}: {e}")
@@ -87,9 +96,22 @@ class SanitizeWorker(QObject):
                 out_path = self.output_dir / (stem + file_path.suffix)
                 session = SanitizeSession()
                 result = sanitizer.sanitize(detections, out_path, session)
-                if result.success and password:
-                    vault_path = self.output_dir / (stem + ".vault")
-                    session.save_vault(vault_path, password)
+                if result.success:
+                    if password:
+                        vault_path = self.output_dir / (stem + ".vault")
+                        session.save_vault(vault_path, password)
+                    try:
+                        from utils.audit_log import log_sanitization
+                        log_sanitization(file_path, out_path, detections)
+                    except Exception as audit_err:
+                        # Audit failure must never block sanitization, but
+                        # surface it as a warning so the user is aware.
+                        self.error.emit(
+                            f"[Audit] {file_path.name}",
+                            f"Audit log write failed: {audit_err}",
+                        )
+                    for w in getattr(result, "warnings", []):
+                        self.error.emit(f"[Warning] {file_path.name}", w)
                 self.file_done.emit(file_path.name)
             except Exception as e:
                 self.error.emit(file_path.name, f"{type(e).__name__}: {e}")
@@ -155,8 +177,11 @@ class MainWindow(QMainWindow):
         self._thread_worker_map: dict[QThread, QObject] = {}
         self._busy = False
         self._batch_errors: list[tuple[str, str]] = []  # (filename, error) pairs
-        theme.apply_theme(False)  # start in light mode
+        _s = QSettings("DocumentSanitizer", "DocumentSanitizer")
+        self._start_dark = _s.value("dark_mode", False, type=bool)
+        theme.apply_theme(self._start_dark)
         self._setup_ui()
+        self._load_profile()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -247,6 +272,10 @@ class MainWindow(QMainWindow):
         self._theme_btn.setToolTip("Toggle between light and dark mode")
         self._theme_btn.clicked.connect(self._toggle_theme)
         tb_layout.addWidget(self._theme_btn)
+        # Restore persisted theme state on the button
+        if self._start_dark:
+            self._theme_btn.setChecked(True)
+            self._theme_btn.setText("Light mode")
 
         layout.addWidget(toolbar)
 
@@ -488,6 +517,56 @@ class MainWindow(QMainWindow):
     # Step 2 — Sanitize
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _ask_vault_password() -> str | None:
+        """Show a single dialog with password + confirm fields.
+
+        Returns the password string (empty string means skip vault),
+        or ``None`` if the user cancelled.
+        """
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout
+
+        dlg = QDialog()
+        dlg.setWindowTitle("Vault password")
+        form = QFormLayout(dlg)
+
+        info = QLabel("Enter a password to encrypt the token vault.\nLeave empty to skip vault creation.")
+        form.addRow(info)
+
+        pw1 = QLineEdit()
+        pw1.setEchoMode(QLineEdit.EchoMode.Password)
+        pw1.setPlaceholderText("Password (min 8 characters)")
+        form.addRow("Password:", pw1)
+
+        pw2 = QLineEdit()
+        pw2.setEchoMode(QLineEdit.EchoMode.Password)
+        pw2.setPlaceholderText("Confirm password")
+        form.addRow("Confirm:", pw2)
+
+        hint = QLabel("")
+        hint.setStyleSheet("color: #c62828;")
+        form.addRow(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        form.addRow(buttons)
+
+        def _validate():
+            p = pw1.text()
+            if p and len(p) < 8:
+                hint.setText("Password must be at least 8 characters.")
+                return
+            if p and p != pw2.text():
+                hint.setText("Passwords do not match.")
+                return
+            dlg.accept()
+
+        buttons.accepted.connect(_validate)
+        buttons.rejected.connect(dlg.reject)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return pw1.text()
+
     def _run_sanitize(self):
         if not self._files or not self._detections_map:
             return
@@ -497,6 +576,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No output folder", "Please select an output folder.")
             return
         output_dir = Path(output_dir_str)
+        if not output_dir.is_dir():
+            QMessageBox.warning(
+                self, "Invalid output folder",
+                f"The output folder does not exist:\n{output_dir}\n\n"
+                "Please select or create a valid folder.",
+            )
+            return
 
         total_findings = sum(
             sum(1 for d in dets if d.redact)
@@ -510,32 +596,9 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
-        password, ok = QInputDialog.getText(
-            self, "Vault password",
-            "Enter a password to encrypt the token vault\n(leave empty to skip vault):",
-            QLineEdit.EchoMode.Password,
-        )
-        if not ok:
-            return
-
-        if password:
-            if len(password) < 8:
-                QMessageBox.warning(
-                    self, "Weak password",
-                    "Vault password must be at least 8 characters long.",
-                )
-                return
-            confirm, ok2 = QInputDialog.getText(
-                self, "Confirm vault password",
-                "Re-enter the vault password to confirm:",
-                QLineEdit.EchoMode.Password,
-            )
-            if not ok2 or confirm != password:
-                QMessageBox.warning(
-                    self, "Password mismatch",
-                    "The passwords do not match. Sanitization cancelled.",
-                )
-                return
+        password = self._ask_vault_password()
+        if password is None:
+            return  # user cancelled
 
         self._batch_errors.clear()
         worker = SanitizeWorker(
@@ -595,13 +658,9 @@ class MainWindow(QMainWindow):
         dark = self._theme_btn.isChecked()
         self._theme_btn.setText("Light mode" if dark else "Dark mode")
         theme.apply_theme(dark)
-        # Re-render the preview table so severity colours update
-        row = self._file_list.currentRow()
-        if 0 <= row < len(self._files):
-            key = str(self._files[row])
-            if key in self._detections_map:
-                self._preview.clear()
-                self._preview.load_detections(self._files[row].name, self._detections_map[key])
+        QSettings("DocumentSanitizer", "DocumentSanitizer").setValue("dark_mode", dark)
+        # Re-paint severity colours in-place (no table rebuild needed)
+        self._preview.refresh_colors()
 
     def _on_settings_changed(self):
         from detectors.engine import invalidate_cache
@@ -610,6 +669,34 @@ class MainWindow(QMainWindow):
         self._detections_map.clear()
         self._preview.clear()
         self._update_buttons()
+
+    # ------------------------------------------------------------------
+    # Profile persistence (entity settings + custom terms)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _profile_path() -> Path:
+        return Path.home() / ".document_sanitizer" / "profile.json"
+
+    def _load_profile(self):
+        import json as _json
+        path = self._profile_path()
+        if not path.exists():
+            return
+        try:
+            state = _json.loads(path.read_text(encoding="utf-8"))
+            self._settings_panel.load_state(state)
+        except Exception:
+            pass  # corrupt or outdated profile — silently ignore
+
+    def _save_profile(self):
+        import json as _json
+        path = self._profile_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_json.dumps(self._settings_panel.get_state(), indent=2), encoding="utf-8")
+        except Exception:
+            pass  # best-effort; never crash on close
 
     def _browse_output(self):
         folder = pick_folder(self)
@@ -682,10 +769,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
+        self._save_profile()
         for w in self._workers:
             if hasattr(w, 'cancel'):
                 w.cancel()
         for t in self._threads:
             t.quit()
             t.wait(5000)
+        # Release stale references so workers/threads can be garbage-collected
+        self._workers.clear()
+        self._threads.clear()
+        self._thread_worker_map.clear()
         event.accept()

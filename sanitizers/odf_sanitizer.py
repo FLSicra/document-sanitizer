@@ -1,5 +1,5 @@
 from pathlib import Path
-from sanitizers.base import Detection, SanitizeResult, Sanitizer
+from sanitizers.base import Detection, SanitizeResult, Sanitizer, replace_detections_in_text
 from detectors.engine import analyze_text
 from utils.streaming import check_zip_bomb
 
@@ -21,18 +21,21 @@ class ODFSanitizer(Sanitizer):
         self,
         custom_terms: tuple[str, ...] = (),
         enabled_entities: frozenset[str] | None = None,
+        progress_callback=None,
     ) -> list[Detection]:
         check_zip_bomb(self.path)
         from odf.opendocument import load
         doc = load(str(self.path))
         detections = []
-        all_text = ""
+        parts = []
         nodes = []
+        offset = 0
         for text_node, _parent in self._iter_text_nodes(doc):
             content = text_node.data
-            start = len(all_text)
-            all_text += content
-            nodes.append((text_node, start, len(all_text)))
+            parts.append(content)
+            nodes.append((text_node, offset, offset + len(content)))
+            offset += len(content)
+        all_text = "".join(parts)
 
         results = analyze_text(all_text, custom_terms, enabled_entities)
         for r in results:
@@ -51,21 +54,19 @@ class ODFSanitizer(Sanitizer):
         try:
             from odf.opendocument import load
             doc = load(str(self.path))
-            all_text = ""
+            parts = []
             nodes = []
+            offset = 0
             for text_node, parent in self._iter_text_nodes(doc):
                 content = text_node.data
-                start = len(all_text)
-                all_text += content
-                nodes.append((text_node, start, len(all_text)))
+                parts.append(content)
+                nodes.append((text_node, offset, offset + len(content)))
+                offset += len(content)
+            all_text = "".join(parts)
 
-            to_redact = [d for d in detections if d.redact]
-            to_redact.sort(key=lambda d: d.start, reverse=True)
-
-            for d in to_redact:
-                token = session.get_or_create_token(d) if session else "[REDACTED]"
-                d.token = token
-                all_text = all_text[:d.start] + token + all_text[d.end:]
+            if session is not None:
+                session.initialize_from_content([all_text])
+            all_text = replace_detections_in_text(all_text, detections, session)
 
             # Put all modified text in the first node and clear the rest.
             # Using original node lengths is incorrect when token lengths differ from
